@@ -21,6 +21,7 @@ from openfold3.core.data.prepared_bundle import (
     PreparedTemplateSet,
     clear_template_inputs,
     materialise_msas,
+    materialise_templates,
     msa_array_to_a3m,
     restore_prepared_templates,
     write_prepared_query_sets,
@@ -173,6 +174,48 @@ def test_template_sidecar_owns_relative_mmcif_paths(tmp_path):
     assert payload["templates"][0]["mmcif_path"] == "template.cif"
     restored = PreparedTemplateSet.from_json(sidecar_path)
     assert restored.templates[0].mmcif_path == cif_path.resolve()
+
+
+def test_materialised_templates_reuse_mmcif_for_duplicate_occurrences(tmp_path):
+    structure_directory = tmp_path / "structures"
+    structure_directory.mkdir()
+    cif_path = structure_directory / "1abc.cif"
+    cif_path.write_text("data_template\n")
+    cache_path = tmp_path / "template_cache.npz"
+    cache_entry = {
+        "index": 4,
+        "release_date": "2020-01-01",
+        "idx_map": np.asarray([[0, 2], [1, 3]]),
+    }
+    np.savez_compressed(cache_path, **{"1abc_A": cache_entry})
+    query_set = InferenceQuerySet.model_validate(
+        {
+            "queries": {
+                "target": {
+                    "chains": [
+                        {
+                            "molecule_type": "protein",
+                            "chain_ids": ["A"],
+                            "sequence": "ACDE",
+                            "template_alignment_file_path": cache_path,
+                            "template_entry_chain_ids": ["1abc_A", "1abc_A"],
+                        }
+                    ]
+                }
+            }
+        }
+    )
+    config = SimpleNamespace(
+        structure_file_format="cif", structure_directory=structure_directory
+    )
+
+    materialise_templates(query_set, tmp_path / "output", config, compress=True)
+
+    chain = query_set.queries["target"].chains[0]
+    template_set = PreparedTemplateSet.from_json(chain.prepared_template_file_path)
+    assert len(template_set.templates) == 2
+    assert template_set.templates[0].mmcif_path == template_set.templates[1].mmcif_path
+    assert len(list((tmp_path / "output/target/msas").glob("*.cif.zst"))) == 1
 
 
 def test_restore_prepared_templates_rebuilds_native_runtime_cache(tmp_path):

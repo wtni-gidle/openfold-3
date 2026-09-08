@@ -311,7 +311,8 @@ def materialise_templates(
 
             entity_id = sanitise_job_name(str(chain.chain_ids[0]))
             prepared_templates = []
-            for output_index, template_id in enumerate(template_ids):
+            cif_paths_by_entry: dict[str, Path] = {}
+            for template_id in template_ids:
                 if template_id not in cache:
                     raise ValueError(
                         f"Template {template_id!r} is absent from cache {cache_path}"
@@ -336,16 +337,19 @@ def materialise_templates(
                         f"Structure for template {template_id} not found: {source_path}"
                     )
 
-                suffix = ".cif.zst" if compress else ".cif"
-                cif_path = msa_directory / (
-                    f"{sanitise_job_name(query_name)}__{entity_id}_template_"
-                    f"{output_index}{suffix}"
-                )
-                cif_text = read_text_auto(source_path)
-                if compress:
-                    write_zstd_text(cif_path, cif_text)
-                else:
-                    atomic_write_text(cif_path, cif_text)
+                cif_path = cif_paths_by_entry.get(entry_id)
+                if cif_path is None:
+                    suffix = ".cif.zst" if compress else ".cif"
+                    cif_path = msa_directory / (
+                        f"{sanitise_job_name(query_name)}__{entity_id}_template_"
+                        f"{sanitise_job_name(entry_id)}{suffix}"
+                    )
+                    cif_text = read_text_auto(source_path)
+                    if compress:
+                        write_zstd_text(cif_path, cif_text)
+                    else:
+                        atomic_write_text(cif_path, cif_text)
+                    cif_paths_by_entry[entry_id] = cif_path
 
                 idx_map = np.asarray(entry["idx_map"], dtype=int)
                 prepared_templates.append(
