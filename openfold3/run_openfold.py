@@ -21,6 +21,8 @@ Main run script for OpenFold3. Please see the README for usage details.
 
 import logging
 import os
+import tempfile
+from datetime import timedelta
 from pathlib import Path
 
 import click
@@ -138,6 +140,14 @@ def train(
     help="Number of model seeds to use for each query.",
 )
 @click.option(
+    "--seeds",
+    "--model-seeds",
+    "--model_seeds",
+    type=str,
+    default=None,
+    help="Explicit comma-separated uint32 model seeds, e.g. 40,41,42.",
+)
+@click.option(
     "--runner-yaml",
     "--runner_yaml",
     type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
@@ -172,6 +182,53 @@ def train(
     help="Output directory for writing results",
 )
 @click.option(
+    "-D",
+    "--run-data-pipeline",
+    "--run_data_pipeline",
+    type=bool,
+    default=True,
+    show_default=True,
+    help="Run MSA/template preparation and publish prepared bundles.",
+)
+@click.option(
+    "-P",
+    "--run-inference",
+    "--run_inference",
+    type=bool,
+    default=True,
+    show_default=True,
+    help="Run model inference.",
+)
+@click.option(
+    "--write-input-json",
+    "--write_input_json",
+    type=bool,
+    default=True,
+    show_default=True,
+    help="Write one <query>_data.json prepared bundle per query.",
+)
+@click.option(
+    "--compress-fold-input",
+    "--compress_fold_input",
+    type=bool,
+    default=True,
+    show_default=True,
+    help="Write prepared A3M and mmCIF resources with zstd compression.",
+)
+@click.option(
+    "--skip",
+    type=bool,
+    default=None,
+    help="Skip seeds whose complete expected outputs already exist.",
+)
+@click.option(
+    "--max-template-date",
+    "--max_template_date",
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    default=None,
+    help="Inclusive maximum release date for searched templates.",
+)
+@click.option(
     "--use_tf32",
     type=bool,
     default=True,
@@ -183,17 +240,66 @@ def predict(
     inference_ckpt_name: str | None = None,
     num_diffusion_samples: int | None = None,
     num_model_seeds: int | None = None,
+    seeds: str | None = None,
     runner_yaml: Path | None = None,
     use_msa_server: bool | None = None,
     use_templates: bool | None = None,
     output_dir: Path | None = None,
+    run_data_pipeline: bool = True,
+    run_inference: bool = True,
+    write_input_json: bool = True,
+    compress_fold_input: bool = True,
+    skip: bool | None = None,
+    max_template_date=None,
     use_tf32: bool = True,
 ):
     """Perform inference on a set of queries defined in the query_json."""
-    _configure_torch_backend()
-    if use_tf32:
-        _enable_tf32()
+    if not run_data_pipeline and not run_inference:
+        raise click.UsageError(
+            "At least one of --run-data-pipeline and --run-inference must be true"
+        )
+    if seeds is not None and num_model_seeds is not None:
+        raise click.UsageError("--seeds and --num-model-seeds are mutually exclusive")
+    if num_model_seeds is not None and num_model_seeds < 1:
+        raise click.BadParameter(
+            "must be a positive integer", param_hint="--num-model-seeds"
+        )
+    if num_diffusion_samples is not None and num_diffusion_samples < 1:
+        raise click.BadParameter(
+            "must be a positive integer", param_hint="--num-diffusion-samples"
+        )
 
+    explicit_seeds = None
+    if seeds is not None:
+        try:
+            explicit_seeds = [int(value.strip()) for value in seeds.split(",")]
+        except ValueError as exc:
+            raise click.BadParameter(
+                "seeds must be comma-separated integers", param_hint="--seeds"
+            ) from exc
+        if (
+            not explicit_seeds
+            or len(explicit_seeds) != len(set(explicit_seeds))
+            or any(seed < 0 or seed > 2**32 - 1 for seed in explicit_seeds)
+        ):
+            raise click.BadParameter(
+                "seeds must be unique uint32 values", param_hint="--seeds"
+            )
+
+    if run_inference:
+        _configure_torch_backend()
+        if use_tf32:
+            _enable_tf32()
+
+    from openfold3.core.data.framework.data_module import InferenceDataModule
+    from openfold3.core.data.prepared_bundle import (
+        clear_template_inputs,
+        materialise_msas,
+        materialise_templates,
+        restore_prepared_templates,
+        validate_inference_only_templates,
+        write_prepared_query_sets,
+    )
     from openfold3.entry_points.experiment_runner import (
         InferenceExperimentRunner,
     )
@@ -220,28 +326,127 @@ def predict(
     if runner_yaml:
         config_utils.deep_update(runner_args, config_utils.load_yaml(runner_yaml))
 
+    experiment_settings = runner_args.setdefault("experiment_settings", {})
+    runner_configures_seeds = any(
+        key in experiment_settings for key in ("seeds", "num_seeds")
+    )
+    experiment_settings["run_data_pipeline"] = run_data_pipeline
+    experiment_settings["run_inference"] = run_inference
+    experiment_settings["write_input_json"] = write_input_json
+    experiment_settings["compress_fold_input"] = compress_fold_input
+    if skip is not None:
+        experiment_settings["skip_existing"] = skip
+
     expt_config = InferenceExperimentConfig(
         inference_ckpt_path=inference_ckpt_path,
         inference_ckpt_name=inference_ckpt_name,
         user_default_runner_yaml_path=user_default_runner_path,
         **runner_args,
     )
+    msa_compute_settings = expt_config.msa_computation_settings
+    if msa_compute_settings.msa_output_directory is None:
+        msa_compute_settings.save_openfold_outputs = False
+    if msa_compute_settings.colabfold_output_dir is None:
+        msa_compute_settings.save_colabfold_outputs = False
+    if max_template_date is not None:
+        # The native preprocessor uses an exclusive cutoff.  EnsembleFold exposes
+        # an inclusive date consistently with its other wrappers.
+        expt_config.template_preprocessor_settings.max_release_date = (
+            max_template_date + timedelta(days=1)
+        )
     expt_runner = InferenceExperimentRunner(
         expt_config,
-        num_diffusion_samples,
-        num_model_seeds,
-        use_msa_server,
-        use_templates,
-        output_dir,
+        num_diffusion_samples=num_diffusion_samples,
+        num_model_seeds=num_model_seeds,
+        use_msa_server=use_msa_server,
+        use_templates=use_templates,
+        output_dir=output_dir,
+        model_seeds=explicit_seeds,
     )
 
     # Load inference query set
     query_set = InferenceQuerySet.from_json(query_json)
+    if (
+        explicit_seeds is not None
+        or num_model_seeds is not None
+        or runner_configures_seeds
+    ):
+        query_set.seeds = list(expt_runner.seeds)
+    else:
+        expt_runner.set_model_seeds(query_set.seeds)
 
-    # Run the forward pass
+    # Run the requested preparation stage without creating a model or checkpoint.
     try:
-        expt_runner.setup()
-        expt_runner.run(query_set)
+        if run_data_pipeline:
+            expt_runner.inference_query_set = query_set
+            data_module = InferenceDataModule(
+                expt_runner.data_module_config,
+                use_msa_server=expt_runner.use_msa_server,
+                use_templates=expt_runner.use_templates,
+                msa_computation_settings=expt_config.msa_computation_settings,
+            )
+            data_module.prepare_data()
+            query_set = data_module.inference_config.query_set
+            if not expt_runner.use_templates:
+                clear_template_inputs(query_set)
+            materialise_msas(
+                query_set,
+                expt_runner.output_dir,
+                expt_config.dataset_config_kwargs.msa,
+                compress=compress_fold_input,
+            )
+            if expt_runner.use_templates:
+                materialise_templates(
+                    query_set,
+                    expt_runner.output_dir,
+                    expt_config.template_preprocessor_settings,
+                    compress=compress_fold_input,
+                )
+            prepared_paths = {}
+            if write_input_json:
+                prepared_paths = write_prepared_query_sets(
+                    query_set, expt_runner.output_dir
+                )
+
+            if run_inference and prepared_paths:
+                prepared_queries = {}
+                for path in prepared_paths.values():
+                    prepared = InferenceQuerySet.from_json(path)
+                    prepared_queries.update(prepared.queries)
+                query_set = InferenceQuerySet(
+                    seeds=list(query_set.seeds), queries=prepared_queries
+                )
+
+        if run_inference:
+            # Inference-only never performs network/database preprocessing.  It
+            # reconstructs native caches from the immutable prepared bundle.
+            inference_uses_templates = expt_runner.use_templates
+            if inference_uses_templates:
+                if not run_data_pipeline:
+                    validate_inference_only_templates(query_set)
+            else:
+                clear_template_inputs(query_set)
+            expt_runner.set_preprocessing_flags(
+                use_msa_server=False, use_templates=False
+            )
+            if not expt_runner.has_pending_queries(query_set):
+                logger.info("All requested query/seed outputs are complete; skipping")
+                expt_runner.cleanup()
+                return
+            runtime_parent = os.environ.get("SLURM_TMPDIR")
+            if runtime_parent and not Path(runtime_parent).is_dir():
+                runtime_parent = None
+            with tempfile.TemporaryDirectory(
+                prefix="openfold3-inference-", dir=runtime_parent
+            ) as runtime_name:
+                if inference_uses_templates:
+                    restore_prepared_templates(
+                        query_set,
+                        Path(runtime_name),
+                        expt_config.template_preprocessor_settings,
+                    )
+                expt_runner.setup()
+                expt_runner.run(query_set)
     except BaseException:
         expt_runner.cleanup_msa_workspace()
         raise

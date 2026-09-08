@@ -596,8 +596,16 @@ def collect_colabfold_msa_data(
     m_i = 101
     # Get unique set of sequences for main MSAs
     for query_name, query in inference_query_set.queries.items():
+        if not query.use_msas:
+            continue
+
         chain_inputs_seen = set()
         rep_ids_query = []
+        query_has_prepaired_msa = any(
+            chain.molecule_type == MoleculeType.PROTEIN
+            and chain.paired_msa_file_paths is not None
+            for chain in query.chains
+        )
 
         for chain in query.chains:
             if chain.molecule_type == MoleculeType.PROTEIN:
@@ -634,10 +642,11 @@ def collect_colabfold_msa_data(
                         )
 
                 # Collect paired MSA data
-                for chain_input in chain_inputs:
-                    rep_ids_query.append(
-                        colabfold_mapper.chain_id_to_rep_id[chain_input.name]
-                    )
+                if query.use_paired_msas and not query_has_prepaired_msa:
+                    for chain_input in chain_inputs:
+                        rep_ids_query.append(
+                            colabfold_mapper.chain_id_to_rep_id[chain_input.name]
+                        )
 
         # Only do pairing if number of unique protein sequences is > 1
         if len(set(rep_ids_query)) > 1:
@@ -1012,6 +1021,9 @@ def add_msa_paths_to_iqs(
             The updated inference query set with the MSA file paths added.
     """
     for query_name, query in inference_query_set.queries.items():
+        if not query.use_msas:
+            continue
+
         for chain in query.chains:
             if chain.molecule_type == MoleculeType.PROTEIN:
                 # Add main MSA file paths to the chain field
@@ -1024,17 +1036,18 @@ def add_msa_paths_to_iqs(
                         output_directory / "main" / str(rep_id) / "colabfold_main.a3m"
                     )
 
-                if chain.main_msa_file_paths is not None:
-                    warnings.warn(
-                        f"Query {query_name} chain {chain.chain_ids} already has "
-                        "main_msa_file_paths set. These are now overwritten "
-                        "with path(s) to the ColabFold MSAs.",
-                        stacklevel=2,
-                    )
-                chain.main_msa_file_paths = [main_msa_file_path]
+                # Keep a query-row alignment even when ``use_main_msas`` is false.
+                # The query flag controls feature construction; this row lets the
+                # parser recover the representative sequence.
+                if chain.main_msa_file_paths is None:
+                    chain.main_msa_file_paths = [main_msa_file_path]
 
                 # Add paired MSA file paths to the chain field
-                if query_name in colabfold_mapper.query_name_to_complex_id:
+                if (
+                    query.use_paired_msas
+                    and chain.paired_msa_file_paths is None
+                    and query_name in colabfold_mapper.query_name_to_complex_id
+                ):
                     complex_id = colabfold_mapper.query_name_to_complex_id[query_name]
 
                     # Use npz if available, otherwise use a3m
@@ -1053,23 +1066,13 @@ def add_msa_paths_to_iqs(
                             / "colabfold_paired.a3m"
                         )
 
-                    if chain.paired_msa_file_paths is not None:
-                        warnings.warn(
-                            f"Query {query_name} chain {chain.chain_ids} already has "
-                            "paired_msa_file_paths set. These are now "
-                            "overwritten with path(s) to the ColabFold MSAs.",
-                            stacklevel=2,
-                        )
                     chain.paired_msa_file_paths = [paired_msa_file_paths]
 
-                if chain.template_cif_paths is not None:
-                    warnings.warn(
-                        f"Query {query_name} chain {chain.chain_ids} already has "
-                        "template_cif_paths set. These are not overwritten with "
-                        "path(s) to the template CIF files from the "
-                        "ColabFold MSA server.",
-                        stacklevel=2,
-                    )
+                if (
+                    chain.template_cif_paths is not None
+                    or chain.template_alignment_file_path is not None
+                    or chain.prepared_template_file_path is not None
+                ):
                     continue
                 # Add template alignment file paths
                 template_alignment_file_path = (
@@ -1079,14 +1082,6 @@ def add_msa_paths_to_iqs(
                     / "colabfold_template.m8"
                 )
                 if template_alignment_file_path.exists():
-                    if chain.template_alignment_file_path is not None:
-                        warnings.warn(
-                            f"Query {query_name} chain {chain} already has its"
-                            "template_alignment_file_path set. This are now "
-                            "overwritten with a path to the template alignment file"
-                            "from the ColabFold MSA server.",
-                            stacklevel=2,
-                        )
                     chain.template_alignment_file_path = template_alignment_file_path
 
     return inference_query_set
@@ -1320,6 +1315,10 @@ def preprocess_colabfold_msas(
     if compute_settings.save_mappings:
         save_colabfold_mappings(colabfold_mapper, output_directory)
 
+    if not colabfold_mapper.seqs:
+        logger.info("No query enables protein MSAs; skipping ColabFold server calls")
+        return inference_query_set
+
     # Run batch queries for main and paired MSAs
     colabfold_query_runner = ColabFoldQueryRunner(
         colabfold_mapper=colabfold_mapper,
@@ -1390,6 +1389,9 @@ def augment_main_msa_with_query_sequence(
         output_directory = compute_settings.workspace_directory
     output_ready = False
     for query_name, query in inference_query_set.queries.items():
+        if not query.use_msas:
+            continue
+
         for chain in query.chains:
             if (
                 chain.molecule_type == MoleculeType.PROTEIN

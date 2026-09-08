@@ -25,6 +25,8 @@ from lightning_fabric.utilities.rank_zero import (
     rank_zero_only,
 )
 
+from openfold3.core.data.prepared_bundle import atomic_write_text, sanitise_job_name
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
@@ -236,15 +238,19 @@ class PredictTimer(pl.Callback):
 
         # Iterate over all predictions in the batch
         for b in range(batch_size):
-            seed = batch["seed"][b]
-            query_id = batch["query_id"][b]
-
-            output_subdir = Path(self.output_dir) / query_id / f"seed_{seed}"
+            seed_value = batch["seed"][b]
+            seed = int(seed_value.item() if hasattr(seed_value, "item") else seed_value)
+            query_id = sanitise_job_name(str(batch["query_id"][b]))
 
             # Save runtime for the batch
-            runtime_file = output_subdir / "timing.json"
+            runtime_file = (
+                Path(self.output_dir)
+                / query_id
+                / "timings"
+                / f"seed-{seed}_timing.json"
+            )
             runtime_json = {"runtime_s": runtime_per_sample}
-            runtime_file.write_text(json.dumps(runtime_json, indent=4))
+            atomic_write_text(runtime_file, json.dumps(runtime_json, indent=4) + "\n")
 
 
 def set_seed_for_rank(seed: int, rank: int) -> None:
@@ -320,9 +326,12 @@ class LogInferenceQuerySet(pl.Callback):
     @rank_zero_only
     def on_predict_start(self, trainer, pl_module):
         log_path = self.output_dir / "inference_query_set.json"
-        with open(log_path, "w") as fp:
-            fp.write(
+        atomic_write_text(
+            log_path,
+            (
                 pl_module.trainer.datamodule.inference_config.query_set.model_dump_json(
                     indent=4
                 )
-            )
+                + "\n"
+            ),
+        )

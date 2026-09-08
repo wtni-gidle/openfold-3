@@ -38,6 +38,7 @@ class MsaChainDataInference(BaseModel):
     """Inference input for a single chain in the MSA sample processor pipeline."""
 
     molecule_type: MoleculeType
+    sequence: str
     paired_msa_file_paths: (
         Annotated[list[FilePath | DirectoryPath], BeforeValidator(_ensure_list)] | None
     ) = None
@@ -100,6 +101,7 @@ class MsaSampleProcessorInputInference(BaseModel):
             for chain_id in chain.chain_ids:
                 msa_chain_data[chain_id] = MsaChainDataInference(
                     molecule_type=chain.molecule_type,
+                    sequence=chain.sequence,
                     paired_msa_file_paths=chain.paired_msa_file_paths,
                     main_msa_file_paths=chain.main_msa_file_paths,
                 )

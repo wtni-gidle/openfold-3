@@ -313,6 +313,18 @@ class InferenceExperimentSettings(ExperimentSettings):
     use_msa_server: bool = True
     use_templates: bool = True
     skip_existing: bool = False
+    run_data_pipeline: bool = True
+    run_inference: bool = True
+    write_input_json: bool = True
+    compress_fold_input: bool = True
+
+    @model_validator(mode="after")
+    def validate_stages(self):
+        if not self.run_data_pipeline and not self.run_inference:
+            raise ValueError(
+                "At least one of run_data_pipeline and run_inference must be true"
+            )
+        return self
 
     @model_validator(mode="after")
     def generate_seeds(self):
@@ -330,6 +342,12 @@ class InferenceExperimentSettings(ExperimentSettings):
         elif self.seeds is None:
             raise ValueError("seeds must be provided (either int or list[int])")
 
+        if not self.seeds:
+            raise ValueError("seeds must not be empty")
+        if len(self.seeds) != len(set(self.seeds)):
+            raise ValueError("seeds must be unique")
+        if any(seed < 0 or seed > 2**32 - 1 for seed in self.seeds):
+            raise ValueError("seeds must be uint32 values")
         return self
 
 
@@ -449,6 +467,8 @@ class InferenceExperimentConfig(ExperimentConfig):
     @model_validator(mode="after")
     def validate_ckpt_settings(self):
         """Validates inference_ckpt_path and inference_ckpt name settings."""
+        if not self.experiment_settings.run_inference:
+            return self
         # Prioritize using checkpoint path when set
         if isinstance(self.inference_ckpt_path, Path):
             if self.inference_ckpt_path.exists():
@@ -502,6 +522,9 @@ class InferenceExperimentConfig(ExperimentConfig):
         2) If not found, raises an error
         3) Set the inference_ckpt_path to the found or downloaded checkpoint path.
         """
+        if not self.experiment_settings.run_inference:
+            return self
+
         # Skip ckpt selection if ckpt is previously specified
         if self.inference_ckpt_path is not None:
             return self

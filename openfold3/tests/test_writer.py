@@ -18,6 +18,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 from biotite import structure
 from biotite.structure.io import pdb, pdbx
 
@@ -59,6 +60,59 @@ def dummy_confidence_scores(request):
 
 
 class TestPredictionWriter:
+    def test_categorized_zero_based_output_layout(self, tmp_path):
+        atoms = structure.array(
+            [
+                structure.Atom([1, 2, 3], chain_id="A"),
+                structure.Atom([2, 3, 4], chain_id="A"),
+                structure.Atom([3, 4, 5], chain_id="B"),
+            ]
+        )
+        batch = {"atom_array": [atoms], "seed": [42], "query_id": ["target"]}
+        predicted = torch.tensor(
+            np.stack([atoms.coord, atoms.coord + 1])[None], dtype=torch.float32
+        )
+
+        def ones(shape):
+            return torch.ones(shape, dtype=torch.float32)
+
+        confidence = {
+            "plddt": ones((1, 2, 3)),
+            "pde": ones((1, 2, 2, 2)),
+            "gpde": ones((1, 2)),
+            "pae": ones((1, 2, 2, 2)),
+            "iptm": ones((1, 2)),
+            "ptm": ones((1, 2)),
+            "disorder": ones((1, 2)),
+            "has_clash": ones((1, 2)),
+            "sample_ranking_score": ones((1, 2)),
+            "chain_ptm": {"1": ones((1, 2)), "2": ones((1, 2))},
+            "chain_pair_iptm": {"(1, 2)": ones((1, 2))},
+            "bespoke_iptm": {"(1, 2)": ones((1, 2))},
+        }
+        writer = OF3OutputWriter(tmp_path, structure_format="pdb")
+
+        writer.write_all_outputs(
+            batch,
+            {"atom_positions_predicted": predicted},
+            confidence,
+        )
+
+        for sample in range(2):
+            prefix = f"seed-42_sample-{sample}"
+            expected = (
+                tmp_path / "target" / "models" / f"{prefix}_model.pdb",
+                tmp_path
+                / "target"
+                / "summary_confidences"
+                / f"{prefix}_summary_confidences.json",
+                tmp_path / "target" / "full_data" / f"{prefix}_full_data.json",
+            )
+            assert all(path.stat().st_size > 0 for path in expected)
+            summary = json.loads(expected[1].read_text())
+            assert summary["seed"] == 42
+            assert summary["sample"] == sample
+
     @pytest.mark.parametrize(
         "structure_format",
         ["pdb", "cif", "cif.gz"],
@@ -151,7 +205,7 @@ class TestPredictionWriter:
         )
         output_prefix = output_path / "test"
         output_writer.write_confidence_scores(
-            confidence_scores, atom_array, output_prefix
+            confidence_scores, atom_array, output_prefix, output_prefix
         )
 
     @pytest.mark.parametrize("output_fmt", ["json", "npz"])
@@ -165,7 +219,7 @@ class TestPredictionWriter:
         )
 
         output_prefix = tmp_path / "test"
-        out_file_full = Path(f"{output_prefix}_confidences.{output_fmt}")
+        out_file_full = Path(f"{output_prefix}_full_data.{output_fmt}")
         expected_agg_score_keys = [
             "avg_plddt",
             "gpde",
@@ -179,7 +233,7 @@ class TestPredictionWriter:
             "bespoke_iptm",
         ]
 
-        out_file_agg = Path(f"{output_prefix}_confidences_aggregated.json")
+        out_file_agg = Path(f"{output_prefix}_summary_confidences.json")
         actual_agg_scores = json.loads(out_file_agg.read_text())
         assert set(expected_agg_score_keys) == set(actual_agg_scores.keys())
 
@@ -206,7 +260,7 @@ class TestPredictionWriter:
         self.write_confidence_scores(
             tmp_path, "json", "float32", False, dummy_confidence_scores
         )
-        expected_output_contents = [tmp_path / "test_confidences_aggregated.json"]
+        expected_output_contents = [tmp_path / "test_summary_confidences.json"]
         actual_output_contents = [f for f in tmp_path.glob("*")]
         assert expected_output_contents == actual_output_contents, (
             "Only aggregated confidence scores file should be written"

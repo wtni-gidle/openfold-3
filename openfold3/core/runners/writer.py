@@ -16,6 +16,9 @@
 
 import json
 import logging
+import os
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Literal
 
@@ -26,9 +29,36 @@ from biotite import structure
 from pytorch_lightning.callbacks import BasePredictionWriter
 
 from openfold3.core.data.io.structure.cif import write_structure
+from openfold3.core.data.prepared_bundle import sanitise_job_name
 from openfold3.core.utils.tensor_utils import tensor_tree_map
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def atomic_output_path(path: Path):
+    """Yield a sibling temporary path and publish it with an atomic rename."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    suffix = "".join(path.suffixes)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.stem}.", suffix=suffix, dir=path.parent
+    )
+    os.close(descriptor)
+    temporary_path = Path(temporary_name)
+    try:
+        yield temporary_path
+        os.replace(temporary_path, path)
+    except BaseException:
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def atomic_write_json(path: Path, value: dict) -> None:
+    with atomic_output_path(path) as temporary_path:
+        temporary_path.write_text(
+            json.dumps(value, indent=4, cls=NumpyEncoder), encoding="utf-8"
+        )
 
 
 class NumpyEncoder(json.JSONEncoder):
@@ -88,17 +118,28 @@ class OF3OutputWriter(BasePredictionWriter):
         write_features: bool = False,
         write_latent_outputs: bool = False,
         write_full_confidence_scores: bool = True,
+        summary_dir: Path | None = None,
     ):
         super().__init__(write_interval="batch")
-        self.output_dir = output_dir
+        self.output_dir = Path(output_dir)
         self.structure_format = structure_format
         self.full_confidence_format = full_confidence_output_format
         self.full_confidence_dtype = np.dtype(full_confidence_output_dtype)
         self.write_features = write_features
         self.write_latent_outputs = write_latent_outputs
         self.write_full_confidence_scores = write_full_confidence_scores
+        self.summary_dir = (
+            Path(summary_dir) if summary_dir is not None else self.output_dir
+        )
 
         # Track successfully predicted samples
+        self.success_count = 0
+        self.failed_count = 0
+        self.total_count = 0
+        self.failed_queries = []
+
+    def on_predict_start(self, trainer, pl_module):
+        """Reset counters when one runner executes multiple missing-seed groups."""
         self.success_count = 0
         self.failed_count = 0
         self.total_count = 0
@@ -184,7 +225,10 @@ class OF3OutputWriter(BasePredictionWriter):
         self,
         confidence_scores: dict[str, np.ndarray],
         atom_array: structure.AtomArray,
-        output_prefix: Path,
+        summary_prefix: Path,
+        full_prefix: Path,
+        seed: int | None = None,
+        sample_index: int | None = None,
     ):
         """Writes confidence scores to disk"""
         plddt = confidence_scores["plddt"]
@@ -192,31 +236,27 @@ class OF3OutputWriter(BasePredictionWriter):
         gpde = confidence_scores["gpde"]
         pae = confidence_scores["pae"]
         aggregated_confidence_scores = {"avg_plddt": np.mean(plddt), "gpde": gpde}
+        if seed is not None:
+            aggregated_confidence_scores["seed"] = seed
+        if sample_index is not None:
+            aggregated_confidence_scores["sample"] = sample_index
 
         logger.info("Recording PAE confidence outputs")
         aggregated_confidence_scores |= self.get_pae_confidence_scores(
             confidence_scores, atom_array
         )
 
-        out_file_agg = Path(f"{output_prefix}_confidences_aggregated.json")
-        out_file_agg.write_text(
-            json.dumps(aggregated_confidence_scores, indent=4, cls=NumpyEncoder)
-        )
+        out_file_agg = Path(f"{summary_prefix}_summary_confidences.json")
+        atomic_write_json(out_file_agg, aggregated_confidence_scores)
 
         # Full confidence scores
         if self.write_full_confidence_scores is True:
             full_confidence_scores = {"plddt": plddt, "pde": pde, "pae": pae}
             out_fmt = self.full_confidence_format
-            out_file_full = Path(f"{output_prefix}_confidences.{out_fmt}")
+            out_file_full = Path(f"{full_prefix}_full_data.{out_fmt}")
 
             if out_fmt == "json":
-                out_file_full.write_text(
-                    json.dumps(
-                        full_confidence_scores,
-                        indent=4,
-                        cls=NumpyEncoder,
-                    )
-                )
+                atomic_write_json(out_file_full, full_confidence_scores)
             elif out_fmt == "npz":
                 for key, val in full_confidence_scores.items():
                     if (
@@ -226,9 +266,11 @@ class OF3OutputWriter(BasePredictionWriter):
                         full_confidence_scores[key] = val.astype(
                             self.full_confidence_dtype
                         )
-                np.savez_compressed(
-                    out_file_full, **full_confidence_scores, allow_pickle=False
-                )
+                with atomic_output_path(out_file_full) as temporary_path:
+                    np.savez_compressed(
+                        temporary_path,
+                        **full_confidence_scores,
+                    )
 
     def write_all_outputs(self, batch: dict, outputs: dict, confidence_scores: dict):
         """Writes all outputs for a given batch."""
@@ -238,10 +280,10 @@ class OF3OutputWriter(BasePredictionWriter):
 
         # Iterate over all predictions in the batch
         for b in range(batch_size):
-            seed = batch["seed"][b]
-            query_id = batch["query_id"][b]
-
-            output_subdir = Path(self.output_dir) / query_id / f"seed_{seed}"
+            seed_value = batch["seed"][b]
+            seed = int(seed_value.item() if hasattr(seed_value, "item") else seed_value)
+            query_id = sanitise_job_name(str(batch["query_id"][b]))
+            query_output_dir = Path(self.output_dir) / query_id
 
             # Extract attributes for the current batch
             atom_array_batch = batch["atom_array"][b]
@@ -252,26 +294,35 @@ class OF3OutputWriter(BasePredictionWriter):
 
             # Iterate over all diffusion samples
             for s in range(sample_size):
-                file_prefix = output_subdir / f"{query_id}_seed_{seed}_sample_{s + 1}"
-                file_prefix.parent.mkdir(parents=True, exist_ok=True)
+                sample_prefix = f"seed-{seed}_sample-{s}"
 
                 confidence_scores_sample = _take_sample_dim(confidence_scores_batch, s)
                 predicted_coords_sample = predicted_coords_batch[s]
 
                 # Save predicted structure
-                structure_file = Path(f"{file_prefix}_model.{self.structure_format}")
-                self.write_structure_prediction(
-                    atom_array=atom_array_batch,
-                    predicted_coords=predicted_coords_sample,
-                    plddt=confidence_scores_sample["plddt"],
-                    output_file=structure_file,
+                structure_file = (
+                    query_output_dir
+                    / "models"
+                    / f"{sample_prefix}_model.{self.structure_format}"
                 )
+                with atomic_output_path(structure_file) as temporary_path:
+                    self.write_structure_prediction(
+                        atom_array=atom_array_batch,
+                        predicted_coords=predicted_coords_sample,
+                        plddt=confidence_scores_sample["plddt"],
+                        output_file=temporary_path,
+                    )
 
                 # Save confidence metrics
                 self.write_confidence_scores(
                     confidence_scores=confidence_scores_sample,
-                    output_prefix=file_prefix,
+                    summary_prefix=(
+                        query_output_dir / "summary_confidences" / sample_prefix
+                    ),
+                    full_prefix=(query_output_dir / "full_data" / sample_prefix),
                     atom_array=atom_array_batch,
+                    seed=seed,
+                    sample_index=s,
                 )
 
             def fetch_cur_batch(t):
@@ -283,22 +334,24 @@ class OF3OutputWriter(BasePredictionWriter):
                 cur_feats = t[b : b + 1].squeeze(1)  # noqa: B023
                 return cur_feats.detach().clone().cpu()
 
-            file_prefix = output_subdir / f"{query_id}_seed_{seed}"
-
             # Write out input feature dictionary
             if self.write_features:
-                out_file = Path(f"{file_prefix}_batch.pt")
+                out_file = query_output_dir / "features" / f"seed-{seed}_features.pt"
                 cur_batch = tensor_tree_map(fetch_cur_batch, batch, strict_type=False)
-                torch.save(cur_batch, out_file)
+                with atomic_output_path(out_file) as temporary_path:
+                    torch.save(cur_batch, temporary_path)
                 del cur_batch
 
             # Write out latent reps / raw model outputs
             if self.write_latent_outputs:
-                out_file = Path(f"{file_prefix}_latent_output.pt")
+                out_file = (
+                    query_output_dir / "latents" / f"seed-{seed}_latent_outputs.pt"
+                )
                 cur_output = tensor_tree_map(
                     fetch_cur_batch, outputs, strict_type=False
                 )
-                torch.save(cur_output, out_file)
+                with atomic_output_path(out_file) as temporary_path:
+                    torch.save(cur_output, temporary_path)
                 del cur_output
 
     def on_predict_batch_end(
@@ -381,6 +434,10 @@ class OF3OutputWriter(BasePredictionWriter):
                     global_rank=trainer.global_rank,
                     is_complete=True,
                 )
+                if total_queries > 0 and success_count == 0:
+                    raise RuntimeError(
+                        "OpenFold3 produced no successful prediction outputs"
+                    )
 
         except RuntimeError as e:
             # TODO: Due to additional sync PL does outside of this callback,
@@ -419,10 +476,10 @@ class OF3OutputWriter(BasePredictionWriter):
         """Helper to format the final summary."""
         if is_complete:
             status = "COMPLETE"
-            out_file = self.output_dir / "summary.txt"
+            out_file = self.summary_dir / "summary.txt"
         else:
             status = f"INCOMPLETE (Rank {global_rank})"
-            out_file = self.output_dir / f"fallback_summary_rank_{global_rank}.txt"
+            out_file = self.summary_dir / f"fallback_summary_rank_{global_rank}.txt"
 
         summary = [
             "\n" + "=" * 50,
@@ -440,7 +497,8 @@ class OF3OutputWriter(BasePredictionWriter):
         summary.append("=" * 50 + "\n")
         summary = "\n".join(summary)
 
-        out_file.write_text(summary)
+        with atomic_output_path(out_file) as temporary_path:
+            temporary_path.write_text(summary)
 
         if is_complete:
             print(summary)

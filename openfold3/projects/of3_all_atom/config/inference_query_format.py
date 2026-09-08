@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+from pathlib import Path
 from typing import Annotated, Any, NamedTuple
 
 from pydantic import (
@@ -104,6 +106,7 @@ class Chain(BaseModel):
     template_cif_chain_ids: (
         Annotated[list[str | None], BeforeValidator(_ensure_list)] | None
     ) = None
+    prepared_template_file_path: FilePath | None = None
     sdf_file_path: FilePath | None = None
     cyclic: bool = False
 
@@ -148,13 +151,16 @@ class Chain(BaseModel):
     @model_validator(mode="after")
     def validate_template_inputs(self) -> "Chain":
         """Validate template input consistency."""
-        if (
-            self.template_alignment_file_path is not None
-            and self.template_cif_paths is not None
-        ):
+        template_sources = [
+            self.template_alignment_file_path is not None,
+            self.template_cif_paths is not None,
+            self.prepared_template_file_path is not None,
+        ]
+        if sum(template_sources) > 1:
             raise ValueError(
-                f"Chain {self.chain_ids}: Cannot specify both "
-                "'template_alignment_file_path' and 'template_cif_paths'"
+                f"Chain {self.chain_ids}: At most one of "
+                "'template_alignment_file_path', 'template_cif_paths', and "
+                "'prepared_template_file_path' may be specified"
             )
 
         if self.template_cif_chain_ids is not None:
@@ -211,12 +217,55 @@ class InferenceQuerySet(BaseModel):
     seeds: list[int] = [42]
     queries: dict[str, Query]
 
+    @field_validator("seeds")
+    @classmethod
+    def validate_seeds(cls, seeds: list[int]) -> list[int]:
+        if not seeds:
+            raise ValueError("seeds must not be empty")
+        if len(seeds) != len(set(seeds)):
+            raise ValueError("seeds must be unique")
+        if any(seed < 0 or seed > 2**32 - 1 for seed in seeds):
+            raise ValueError("seeds must be uint32 values")
+        return seeds
+
     @classmethod
     def from_json(cls, json_path: FilePath) -> "InferenceQuerySet":
-        """Load InferenceQuerySet from a JSON file."""
+        """Load a query set and resolve resources relative to its JSON file.
+
+        Native OpenFold historically resolved relative resource paths against the
+        process working directory.  Prepared EnsembleFold bundles must instead be
+        movable and independent of the launch directory, so paths are made absolute
+        relative to the JSON that declares them before Pydantic validates them.
+        """
+        json_path = Path(json_path).resolve()
         with open(json_path) as f:
-            data = f.read()
-        return cls.model_validate_json(data)
+            data = json.load(f)
+
+        resource_fields = {
+            "main_msa_file_paths",
+            "paired_msa_file_paths",
+            "template_alignment_file_path",
+            "template_cif_paths",
+            "prepared_template_file_path",
+            "sdf_file_path",
+        }
+
+        def resolve_resource(value):
+            if value is None:
+                return None
+            if isinstance(value, list):
+                return [resolve_resource(item) for item in value]
+            path = Path(value).expanduser()
+            if not path.is_absolute():
+                path = json_path.parent / path
+            return str(path.resolve())
+
+        for query in data.get("queries", {}).values():
+            for chain in query.get("chains", []):
+                for field in resource_fields & chain.keys():
+                    chain[field] = resolve_resource(chain[field])
+
+        return cls.model_validate(data)
 
     def model_post_init(self, __context: Any) -> None:
         """Add query name to the query objects."""

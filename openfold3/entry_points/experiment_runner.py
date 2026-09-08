@@ -17,9 +17,10 @@ import contextlib
 import json
 import logging
 import os
-import shutil
 import sys
+import uuid
 from abc import ABC, abstractmethod
+from collections import defaultdict
 from functools import cached_property, wraps
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,7 @@ from openfold3.core.data.framework.data_module import (
     DataModuleConfig,
     InferenceDataModule,
 )
+from openfold3.core.data.prepared_bundle import sanitise_job_name
 from openfold3.core.runners.writer import OF3OutputWriter
 from openfold3.core.utils.callbacks import (
     LogInferenceQuerySet,
@@ -630,8 +632,10 @@ class InferenceExperimentRunner(ExperimentRunner):
         use_msa_server: bool | None = None,
         use_templates: bool | None = None,
         output_dir: Path | None = None,
+        model_seeds: list[int] | None = None,
     ):
         super().__init__(experiment_config)
+        self._inference_run_id = uuid.uuid4().hex[:12]
 
         self.experiment_config = experiment_config
 
@@ -647,6 +651,7 @@ class InferenceExperimentRunner(ExperimentRunner):
             output_dir,
             use_msa_server,
             use_templates,
+            model_seeds,
         )
         msa_settings = experiment_config.msa_computation_settings
         msa_settings.set_saved_output_root(self.output_dir / "msas")
@@ -679,6 +684,7 @@ class InferenceExperimentRunner(ExperimentRunner):
         output_dir: Path | None,
         use_msa_server: bool | None = None,
         use_templates: bool | None = None,
+        model_seeds: list[int] | None = None,
     ):
         """Updates configuration given command line args.
 
@@ -693,9 +699,13 @@ class InferenceExperimentRunner(ExperimentRunner):
             logger.info(f"Set diffusion samples to {num_diffusion_samples}")
             self.set_num_diffusion_samples(num_diffusion_samples)
 
-        if num_model_seeds:
+        if model_seeds is not None:
+            self.seeds = list(model_seeds)
+            self.experiment_config.experiment_settings.seeds = list(model_seeds)
+        elif num_model_seeds:
             start_seed = 42
             self.seeds = generate_seeds(start_seed, num_model_seeds)
+            self.experiment_config.experiment_settings.seeds = list(self.seeds)
 
         if use_msa_server is not None:
             self.experiment_config.experiment_settings.use_msa_server = use_msa_server
@@ -711,27 +721,116 @@ class InferenceExperimentRunner(ExperimentRunner):
     def use_templates(self) -> bool:
         return self.experiment_config.experiment_settings.use_templates
 
+    @cached_property
+    def log_dir(self) -> Path:
+        """Use a process-private default log directory for concurrent seed jobs."""
+        configured = self.experiment_config.experiment_settings.log_dir
+        if configured is None:
+            configured = (
+                self.output_dir / ".openfold3_runs" / f"run-{self._inference_run_id}"
+            )
+        configured.mkdir(exist_ok=True, parents=True)
+        return configured
+
+    def set_preprocessing_flags(
+        self, *, use_msa_server: bool, use_templates: bool
+    ) -> None:
+        """Update preprocessing flags and invalidate their cached properties."""
+        settings = self.experiment_config.experiment_settings
+        settings.use_msa_server = use_msa_server
+        settings.use_templates = use_templates
+        self.__dict__.pop("use_msa_server", None)
+        self.__dict__.pop("use_templates", None)
+        self.__dict__.pop("lightning_data_module", None)
+
+    def set_model_seeds(self, seeds: list[int]) -> None:
+        """Set the explicit seed list used by the prediction dataset."""
+        self.seeds = list(seeds)
+        self.experiment_config.experiment_settings.seeds = list(seeds)
+        self.__dict__.pop("lightning_data_module", None)
+
+    @staticmethod
+    def _is_complete_file(path: Path) -> bool:
+        return path.is_file() and path.stat().st_size > 0
+
+    def expected_output_files(self, query_id: str, seed: int) -> list[Path]:
+        """Return every file required for one query/seed to count as complete."""
+        query_directory = self.output_dir / sanitise_job_name(query_id)
+        expected = []
+        for sample_index in range(self.num_diffusion_samples):
+            prefix = f"seed-{seed}_sample-{sample_index}"
+            expected.extend(
+                [
+                    query_directory
+                    / "models"
+                    / f"{prefix}_model.{self.output_writer_settings.structure_format}",
+                    query_directory
+                    / "summary_confidences"
+                    / f"{prefix}_summary_confidences.json",
+                ]
+            )
+            if self.output_writer_settings.write_full_confidence_scores:
+                expected.append(
+                    query_directory
+                    / "full_data"
+                    / (
+                        f"{prefix}_full_data."
+                        f"{self.output_writer_settings.full_confidence_output_format}"
+                    )
+                )
+        if self.output_writer_settings.write_features:
+            expected.append(query_directory / "features" / f"seed-{seed}_features.pt")
+        if self.output_writer_settings.write_latent_outputs:
+            expected.append(
+                query_directory / "latents" / f"seed-{seed}_latent_outputs.pt"
+            )
+        return expected
+
+    def pending_query_groups(
+        self, inference_query_set: InferenceQuerySet
+    ) -> list[tuple[list[int], InferenceQuerySet]]:
+        """Group queries by missing seeds so completed seeds are not recomputed."""
+        grouped_queries: dict[tuple[int, ...], dict] = defaultdict(dict)
+        for query_id, query in inference_query_set.queries.items():
+            missing_seeds = tuple(
+                seed
+                for seed in self.seeds
+                if not all(
+                    self._is_complete_file(path)
+                    for path in self.expected_output_files(query_id, seed)
+                )
+            )
+            if missing_seeds:
+                grouped_queries[missing_seeds][query_id] = query
+
+        return [
+            (
+                list(seeds),
+                InferenceQuerySet(
+                    seeds=list(inference_query_set.seeds), queries=queries
+                ),
+            )
+            for seeds, queries in grouped_queries.items()
+        ]
+
+    def has_pending_queries(self, inference_query_set: InferenceQuerySet) -> bool:
+        if not self.experiment_config.experiment_settings.skip_existing:
+            return bool(inference_query_set.queries)
+        return bool(self.pending_query_groups(inference_query_set))
+
     def remove_completed_queries_from_query_set(self, inference_query_set):
         """Returns a new inference query set with previously completed runs removed."""
-
-        completed_structures = []
-        structure_format = self.output_writer_settings.structure_format
-
-        for query_id in inference_query_set.queries:
-            ## a structure must be present for all seeds and all diffusion samples
-            ## to count as completed
-            structure_exists = True
-            for seed in self.seeds:
-                output_subdir = self.output_dir / query_id / f"seed_{seed}"
-                for s in range(self.num_diffusion_samples):
-                    file_prefix = (
-                        output_subdir / f"{query_id}_seed_{seed}_sample_{s + 1}"
-                    )
-                    structure_file = Path(f"{file_prefix}_model.{structure_format}")
-                    structure_exists = structure_file.exists() and structure_exists
-
-            if structure_exists:
-                completed_structures.append(query_id)
+        completed_structures = [
+            query_id
+            for query_id in inference_query_set.queries
+            if all(
+                all(
+                    self._is_complete_file(path)
+                    for path in self.expected_output_files(query_id, seed)
+                )
+                for seed in self.seeds
+            )
+        ]
 
         logger.info(
             "Skipping existing structures is enabled. Will skip "
@@ -798,22 +897,28 @@ class InferenceExperimentRunner(ExperimentRunner):
 
     def run(self, inference_query_set) -> None:
         """Set up the experiment environment."""
-        self.inference_query_set = inference_query_set
         if self.experiment_config.experiment_settings.skip_existing:
-            inference_query_set = self.remove_completed_queries_from_query_set(
-                inference_query_set
-            )
-            if len(inference_query_set.queries) < 1:
+            groups = self.pending_query_groups(inference_query_set)
+            if not groups:
                 logger.warning("All structures have completed. Quitting")
                 return
+        else:
+            groups = [(list(self.seeds), inference_query_set)]
 
-        self.inference_query_set = inference_query_set
-        logger.info("Beginning inference prediction")
-        self.trainer.predict(
-            model=self.lightning_module,
-            datamodule=self.lightning_data_module,
-            return_predictions=False,
-        )
+        for seeds, grouped_query_set in groups:
+            self.seeds = seeds
+            self.inference_query_set = grouped_query_set
+            self.__dict__.pop("lightning_data_module", None)
+            logger.info(
+                "Beginning inference prediction for %d queries and seeds %s",
+                len(grouped_query_set.queries),
+                seeds,
+            )
+            self.trainer.predict(
+                model=self.lightning_module,
+                datamodule=self.lightning_data_module,
+                return_predictions=False,
+            )
 
     @cached_property
     def callbacks(self):
@@ -823,10 +928,11 @@ class InferenceExperimentRunner(ExperimentRunner):
             [
                 OF3OutputWriter(
                     output_dir=self.output_dir,
+                    summary_dir=self.log_dir,
                     **self.output_writer_settings.model_dump(),
                 ),
                 PredictTimer(self.output_dir),
-                LogInferenceQuerySet(self.output_dir),
+                LogInferenceQuerySet(self.log_dir),
             ]
         )
         return _callbacks
@@ -864,19 +970,15 @@ class InferenceExperimentRunner(ExperimentRunner):
     @rank_zero_only
     def _log_experiment_config(self):
         """Record the experiment config used for this run."""
-        log_path = self.output_dir / "experiment_config.json"
+        log_path = self.log_dir / "experiment_config.json"
         log_path.write_text(self.experiment_config.model_dump_json(indent=4))
 
     @rank_zero_only
     def _log_model_config(self):
         """Records the mlc.ConfigDict of the model configuration."""
-        log_path = self.output_dir / "model_config.json"
+        log_path = self.log_dir / "model_config.json"
         with open(log_path, "w") as fp:
             fp.write(self.model_config.to_json_best_effort(indent=4))
-
-    def _maybe_remove_dir(self, path):
-        if path.exists():
-            shutil.rmtree(path)
 
     def cleanup_msa_workspace(self):
         """Remove the temporary MSA workspace created by this run."""
@@ -891,22 +993,25 @@ class InferenceExperimentRunner(ExperimentRunner):
             )
 
     def cleanup(self):
-        """Cleanup directories from colabfold MSA"""
+        """Clean up only the per-run MSA workspace owned by this runner."""
         self.cleanup_msa_workspace()
-        msa_settings = self.experiment_config.msa_computation_settings
 
-        if self.is_rank_zero and self.log_dir.is_dir() and not os.listdir(self.log_dir):
-            print("Removing empty log directory...")
-            self.log_dir.rmdir()
-
+        # Do not instantiate ``log_dir`` merely to clean it: data-only jobs never
+        # create inference logs.  Remove an already-created private directory only
+        # when it is empty, followed by its now-empty run container.
+        log_dir = self.__dict__.get("log_dir")
         if (
             self.is_rank_zero
-            and self.use_msa_server
-            and msa_settings.cleanup_msa_dir
-            and self.use_templates
+            and isinstance(log_dir, Path)
+            and log_dir.is_dir()
+            and not os.listdir(log_dir)
         ):
-            template_dir = self.experiment_config.template_preprocessor_settings.structure_directory.parent  # noqa: E501
-            self._maybe_remove_dir(template_dir)
+            log_dir.rmdir()
+            run_container = log_dir.parent
+            if run_container.name == ".openfold3_runs" and not os.listdir(
+                run_container
+            ):
+                run_container.rmdir()
 
 
 class WandbHandler:

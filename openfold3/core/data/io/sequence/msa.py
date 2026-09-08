@@ -30,10 +30,12 @@ from openfold3.core.config.msa_pipeline_configs import (
     MsaSampleProcessorInputInference,
     MsaSampleProcessorInputTrain,
 )
+from openfold3.core.data.io.compression import read_text_auto
 from openfold3.core.data.io.sequence.fasta import parse_fasta
 from openfold3.core.data.primitives.quality_control.logging_utils import (
     log_runtime_memory,
 )
+from openfold3.core.data.primitives.sequence.hash import get_sequence_hash
 from openfold3.core.data.primitives.sequence.msa import (
     MsaArray,
     MsaArrayCollection,
@@ -226,6 +228,37 @@ def parse_stockholm(
 MSA_PARSER_REGISTRY = {".a3m": parse_a3m, ".sto": parse_stockholm}
 
 
+def split_alignment_filename(path: Path) -> tuple[str, str]:
+    """Return the semantic MSA key and alignment extension.
+
+    Compression suffixes are intentionally ignored, and EnsembleFold's canonical
+    paired/unpaired filenames map onto the native OpenFold source keys.
+    """
+    name = path.name
+    for compression_suffix in (".zst", ".gz", ".xz"):
+        if name.endswith(compression_suffix):
+            name = name[: -len(compression_suffix)]
+            break
+    base = Path(name)
+    extension = base.suffix
+    basename = base.stem
+    if basename.endswith("_unpairedmsa"):
+        basename = "colabfold_main"
+    elif basename.endswith("_pairedmsa"):
+        basename = "colabfold_paired"
+    return basename, extension
+
+
+def is_canonical_unpaired_alignment(path: Path) -> bool:
+    """Return whether a path is an EnsembleFold finalized unpaired alignment."""
+    name = path.name
+    for compression_suffix in (".zst", ".gz", ".xz"):
+        if name.endswith(compression_suffix):
+            name = name[: -len(compression_suffix)]
+            break
+    return Path(name).stem.endswith("_unpairedmsa")
+
+
 def parse_msas_direct(
     file_list: list[Path], max_seq_counts: dict[str, int] | None = None
 ) -> dict[str, MsaArray]:
@@ -265,7 +298,7 @@ def parse_msas_direct(
                 )
 
             # Split extensions from the filenames
-            basename, ext = aln_file.stem, aln_file.suffix
+            basename, ext = split_alignment_filename(aln_file)
             if ext not in [".sto", ".a3m"]:
                 warnings.warn(
                     f"Found file {basename}.{ext} with an unsupported extension in "
@@ -280,9 +313,18 @@ def parse_msas_direct(
                 continue
 
             # Parse the MSAs with the appropriate parser
-            limit = None if max_seq_counts is None else max_seq_counts.get(basename)
-            with open(aln_file.absolute()) as f:
-                msas[basename] = MSA_PARSER_REGISTRY[ext](f.read(), limit)
+            # The prepared unpaired file is already the concatenated, deduplicated
+            # source pool.  Do not apply the per-source ColabFold cap a second time;
+            # create_main() still applies the native total-row budget after computing
+            # the profile and deletion mean from the full pool.
+            limit = (
+                None
+                if max_seq_counts is None or is_canonical_unpaired_alignment(aln_file)
+                else max_seq_counts.get(basename)
+            )
+            msas[basename] = MSA_PARSER_REGISTRY[ext](
+                read_text_auto(aln_file.absolute()), limit
+            )
 
     return msas
 
@@ -592,16 +634,7 @@ class MsaSampleParserInference(MsaSampleParser):
                     else []
                 )
 
-                # Fetch representative ID
-                rep_ids = set()
-                # from paired if no main MSAs
-                paths = (
-                    main_msa_file_paths
-                    if len(main_msa_file_paths) > 0
-                    else paired_msa_file_paths
-                )
-
-                if len(paths) == 0:
+                if len(main_msa_file_paths) == 0 and len(paired_msa_file_paths) == 0:
                     warnings.warn(
                         (
                             f"Expected MSA file for chain {chain_id} of type "
@@ -613,21 +646,10 @@ class MsaSampleParserInference(MsaSampleParser):
                     )
                     continue
 
-                for msa_file_path in paths:
-                    if msa_file_path.is_dir() or msa_file_path.suffix == ".npz":
-                        rep_ids.add(msa_file_path.stem)
-                    elif msa_file_path.suffix in [".sto", ".a3m"]:
-                        rep_ids.add(msa_file_path.parent.stem)
-
-                rep_id = sorted(rep_ids)[0]
-
-                if len(rep_ids) > 1:
-                    warnings.warn(
-                        f"Found multiple representative IDs {rep_ids} for chain ID "
-                        f"{chain_id}. Only the first representative ID will be used:"
-                        f" {rep_id}.",
-                        stacklevel=2,
-                    )
+                # Inference entities are defined by sequence, not by incidental file
+                # layout.  This also lets flat, human-readable prepared bundles share
+                # MSAs across repeated copies without path-derived ID collisions.
+                rep_id = get_sequence_hash(chain_data.sequence)
 
                 maps.chain_id_to_rep_id[chain_id] = rep_id
                 maps.chain_id_to_mol_type[chain_id] = chain_data.molecule_type
@@ -674,9 +696,8 @@ class MsaSampleParserInference(MsaSampleParser):
                 # Parse main MSAs
                 if rep_id in maps.rep_id_to_main_msa_paths:
                     example_path = maps.rep_id_to_main_msa_paths[rep_id][0]
-                    if example_path.is_dir() or (
-                        example_path.suffix in [".sto", ".a3m"]
-                    ):
+                    _, alignment_extension = split_alignment_filename(example_path)
+                    if example_path.is_dir() or alignment_extension in [".sto", ".a3m"]:
                         file_list = standardize_filepaths(
                             maps.rep_id_to_main_msa_paths[rep_id],
                         )
@@ -710,9 +731,8 @@ class MsaSampleParserInference(MsaSampleParser):
                 # Parse paired MSAs
                 if rep_id in maps.rep_id_to_paired_msa_paths:
                     example_path = maps.rep_id_to_paired_msa_paths[rep_id][0]
-                    if example_path.is_dir() or (
-                        example_path.suffix in [".sto", ".a3m"]
-                    ):
+                    _, alignment_extension = split_alignment_filename(example_path)
+                    if example_path.is_dir() or alignment_extension in [".sto", ".a3m"]:
                         file_list = standardize_filepaths(
                             maps.rep_id_to_paired_msa_paths[rep_id],
                         )

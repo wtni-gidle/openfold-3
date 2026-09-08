@@ -151,6 +151,40 @@ class TestColabfoldMapping:
         order2 = ["BBBB", "AAAA"]
         assert ComplexGroup(order1).rep_id == ComplexGroup(order2).rep_id
 
+    @pytest.mark.parametrize(
+        "query_overrides",
+        [
+            {"use_msas": False},
+            {"use_paired_msas": False},
+        ],
+    )
+    def test_query_msa_flags_control_server_mapping(
+        self, multimer_query_set, query_overrides
+    ):
+        query = multimer_query_set.queries["query1"]
+        for key, value in query_overrides.items():
+            setattr(query, key, value)
+
+        mapper = collect_colabfold_msa_data(multimer_query_set)
+
+        if not query.use_msas:
+            assert mapper.seqs == []
+        assert mapper.complex_id_to_complex_group == {}
+
+    def test_existing_paired_msa_disables_mixed_server_pairing(
+        self, multimer_query_set, tmp_path
+    ):
+        paired_path = tmp_path / "colabfold_paired.a3m"
+        paired_path.write_text(">query\nSHORTDUMMYSEQ\n")
+        multimer_query_set.queries["query1"].chains[0].paired_msa_file_paths = [
+            paired_path
+        ]
+
+        mapper = collect_colabfold_msa_data(multimer_query_set)
+
+        assert mapper.seqs
+        assert mapper.complex_id_to_complex_group == {}
+
 
 class TestRemapColabfoldTemplateChainIds:
     """Tests for remap_colabfold_template_chain_ids (RCSB calls mocked)."""
@@ -514,6 +548,17 @@ class TestColabFoldQueryRunner:
         )
         msa_compute_settings.cleanup_workspace()
         assert expected_file.exists()
+
+    def test_augment_does_not_create_msa_for_disabled_query(self, tmp_path):
+        settings = MsaComputationSettings(msa_file_format="a3m")
+        settings.set_saved_output_root(tmp_path / "saved-openfold")
+        query_set = self._construct_monomer_query("TEST")
+        query_set.queries["query1"].use_msas = False
+
+        augmented = augment_main_msa_with_query_sequence(query_set, settings)
+
+        assert augmented.queries["query1"].chains[0].main_msa_file_paths is None
+        assert not settings.workspace_directory.exists()
 
     @patch(_MOCK_FETCH_TARGET, side_effect=_mock_fetch_label_to_author)
     @patch(_MOCK_QUERY_TARGET)

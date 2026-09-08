@@ -112,16 +112,13 @@ def query_set_from_chains(query_name: str, *chains: Mapping) -> InferenceQuerySe
 
 
 def prediction_dir(output_dir: Path, query_name: str, *, seed: int = SEED) -> Path:
-    """Directory the runner writes one query's predictions into.
-
-    Mirrors ``InferenceExperimentRunner``: ``<output_dir>/<query>/seed_<seed>/``.
-    """
-    return output_dir / query_name / f"seed_{seed}"
+    """Directory the runner writes one query's categorized predictions into."""
+    return output_dir / query_name
 
 
 def prediction_stem(query_name: str, sample: int, *, seed: int = SEED) -> str:
     """Filename prefix shared by one diffusion sample's output files."""
-    return f"{query_name}_seed_{seed}_sample_{sample}"
+    return f"seed-{seed}_sample-{sample}"
 
 
 def predicted_structure_cifs(
@@ -132,10 +129,10 @@ def predicted_structure_cifs(
     Sorted numerically rather than lexicographically so sample 10 does not land between
     1 and 2.
     """
-    directory = prediction_dir(output_dir, query_name, seed=seed)
+    directory = prediction_dir(output_dir, query_name, seed=seed) / "models"
     return sorted(
-        directory.glob(f"{query_name}_seed_{seed}_sample_*_model.cif"),
-        key=lambda path: int(path.stem.rsplit("_sample_", 1)[1].split("_")[0]),
+        directory.glob(f"seed-{seed}_sample-*_model.cif"),
+        key=lambda path: int(path.stem.rsplit("_sample-", 1)[1].split("_")[0]),
     )
 
 

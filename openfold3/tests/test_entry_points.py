@@ -809,39 +809,30 @@ class TestTemplatePreprocessorSettings:
 class TestRemoveQuerySetDuplicates:
     @pytest.fixture
     def dummy_output_path(self, tmp_path):
-        # Creates the following directories:
-        # <output_directory>
-        #  ├── query_1
-        # 	 └── seed_42
-        #         ├── query_1_seed_42_sample_1_model.cif
-        #         ├── query_1_seed_42_sample_2_model.cif
-        # 	 └── seed_43
-        #         ├── query_1_seed_43_sample_1_model.cif
-        #         ├── query_1_seed_43_sample_2_model.cif
-        #  ├── query_2
-        # 	 └── seed_42
-        #         ├── query_1_seed_42_sample_1_model.cif
-        #         ├── query_1_seed_42_sample_2_model.cif
-        # 	 └── seed_43
-        #         ├── query_1_seed_43_sample_1_model.cif
-        #         ├── <Missing sample 2>
-
-        expected_fnames = [
-            "query_1/seed_42/query_1_seed_42_sample_1_model.cif",
-            "query_1/seed_42/query_1_seed_42_sample_2_model.cif",
-            "query_1/seed_43/query_1_seed_43_sample_1_model.cif",
-            "query_1/seed_43/query_1_seed_43_sample_2_model.cif",
-            "query_2/seed_42/query_2_seed_42_sample_1_model.cif",
-            "query_2/seed_42/query_2_seed_42_sample_2_model.cif",
-            "query_2/seed_43/query_2_seed_43_sample_1_model.cif",
-        ]
+        expected_fnames = []
+        completed = {
+            "query_1": {42: (0, 1), 43: (0, 1)},
+            "query_2": {42: (0, 1), 43: (0,)},
+        }
+        for query_id, seeds in completed.items():
+            for seed, samples in seeds.items():
+                for sample in samples:
+                    prefix = f"seed-{seed}_sample-{sample}"
+                    expected_fnames.extend(
+                        [
+                            f"{query_id}/models/{prefix}_model.cif",
+                            f"{query_id}/summary_confidences/"
+                            f"{prefix}_summary_confidences.json",
+                            f"{query_id}/full_data/{prefix}_full_data.json",
+                        ]
+                    )
 
         for fname in expected_fnames:
             _create_fake_file(tmp_path / fname)
 
         return tmp_path
 
-    def test_remove_duplicates(self, dummy_ckpt_file, dummy_output_path):
+    def test_remove_duplicates(self, dummy_ckpt_file, dummy_output_path, tmp_path):
         input_query_set = InferenceQuerySet.model_validate(
             {
                 "queries": {
@@ -880,6 +871,7 @@ class TestRemoveQuerySetDuplicates:
             {
                 "experiment_settings": {"seeds": [42, 43]},
                 "inference_ckpt_path": dummy_ckpt_file,
+                "cache_path": tmp_path / "cache",
             }
         )
         expt_runner = InferenceExperimentRunner(
@@ -891,6 +883,14 @@ class TestRemoveQuerySetDuplicates:
         )
 
         assert set(deduplicated_set.queries.keys()) == set(["query_2", "query_3"])
+
+        groups = expt_runner.pending_query_groups(input_query_set)
+        assert {
+            tuple(seeds): set(query_set.queries) for seeds, query_set in groups
+        } == {
+            (43,): {"query_2"},
+            (42, 43): {"query_3"},
+        }
 
 
 class TestUserDefaultRunnerYaml:

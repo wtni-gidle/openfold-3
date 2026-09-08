@@ -65,6 +65,7 @@ from openfold3.tests.inference.helpers import (
     MMCIFS_DIR,
     MODES,
     SCORED_DIFFUSION_SAMPLES,
+    SEED,
     Mode,
     SampleScores,
     measure_samples,
@@ -581,23 +582,20 @@ def test_inference_writes_outputs(case, mode, tmp_path):
         assert directory.is_dir(), f"Expected MSA directory not found: {directory}"
 
     for query_name in query_set.queries:
-        seed_dir = prediction_dir(tmp_path, query_name)
-        assert (seed_dir / "timing.json").exists(), (
-            f"Expected output file not found: {seed_dir / 'timing.json'}"
-        )
+        query_dir = prediction_dir(tmp_path, query_name)
+        timing_path = query_dir / "timings" / f"seed-{SEED}_timing.json"
+        assert timing_path.exists(), f"Expected output file not found: {timing_path}"
         # Every sample writes its own trio, so a case that draws several must find all
         # of them — checking only sample 1 would let a partial write through, and the
         # accuracy mean is computed over exactly this set.
-        for sample in range(1, case.num_diffusion_samples + 1):
+        for sample in range(case.num_diffusion_samples):
             stem = prediction_stem(query_name, sample=sample)
-            for name in (
-                f"{stem}_confidences.json",
-                f"{stem}_confidences_aggregated.json",
-                f"{stem}_model.cif",
+            for path in (
+                query_dir / "full_data" / f"{stem}_full_data.json",
+                query_dir / "summary_confidences" / f"{stem}_summary_confidences.json",
+                query_dir / "models" / f"{stem}_model.cif",
             ):
-                assert (seed_dir / name).exists(), (
-                    f"Expected output file not found: {seed_dir / name}"
-                )
+                assert path.exists(), f"Expected output file not found: {path}"
         _maybe_assert_accuracy(case, query_name, mode, output_dir=tmp_path)
 
 
