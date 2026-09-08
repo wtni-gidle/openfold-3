@@ -4,6 +4,7 @@
 # you may not use this file except in compliance with the License.
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -13,6 +14,7 @@ from openfold3.core.config.msa_pipeline_configs import (
 )
 from openfold3.core.data.io.compression import read_text_auto, write_zstd_text
 from openfold3.core.data.io.sequence.msa import parse_a3m, parse_msas_direct
+from openfold3.core.data.io.structure.cif import parse_mmcif
 from openfold3.core.data.pipelines.sample_processing.msa import (
     MsaSampleProcessorInference,
 )
@@ -177,17 +179,15 @@ def test_template_sidecar_owns_relative_mmcif_paths(tmp_path):
 
 
 def test_materialised_templates_reuse_mmcif_for_duplicate_occurrences(tmp_path):
-    structure_directory = tmp_path / "structures"
-    structure_directory.mkdir()
-    cif_path = structure_directory / "1abc.cif"
-    cif_path.write_text("data_template\n")
+    structure_directory = Path(__file__).parent / "test_data/mmcifs"
+    cif_path = structure_directory / "1a8q.cif"
     cache_path = tmp_path / "template_cache.npz"
     cache_entry = {
         "index": 4,
         "release_date": "2020-01-01",
         "idx_map": np.asarray([[0, 2], [1, 3]]),
     }
-    np.savez_compressed(cache_path, **{"1abc_A": cache_entry})
+    np.savez_compressed(cache_path, **{"1a8q_A": cache_entry})
     query_set = InferenceQuerySet.model_validate(
         {
             "queries": {
@@ -198,7 +198,7 @@ def test_materialised_templates_reuse_mmcif_for_duplicate_occurrences(tmp_path):
                             "chain_ids": ["A"],
                             "sequence": "ACDE",
                             "template_alignment_file_path": cache_path,
-                            "template_entry_chain_ids": ["1abc_A", "1abc_A"],
+                            "template_entry_chain_ids": ["1a8q_A", "1a8q_A"],
                         }
                     ]
                 }
@@ -212,10 +212,28 @@ def test_materialised_templates_reuse_mmcif_for_duplicate_occurrences(tmp_path):
     materialise_templates(query_set, tmp_path / "output", config, compress=True)
 
     chain = query_set.queries["target"].chains[0]
-    template_set = PreparedTemplateSet.from_json(chain.prepared_template_file_path)
-    assert len(template_set.templates) == 2
-    assert template_set.templates[0].mmcif_path == template_set.templates[1].mmcif_path
-    assert len(list((tmp_path / "output/target/msas").glob("*.cif.zst"))) == 1
+    assert chain.prepared_template_file_path is None
+    assert len(chain.templates) == 2
+    assert chain.templates[0].chain_id is None
+    assert chain.templates[0].mmcif_path == chain.templates[1].mmcif_path
+    cif_files = list((tmp_path / "output/target/templates").glob("*.cif.zst"))
+    assert len(cif_files) == 1
+
+    extracted_path = tmp_path / "extracted.cif"
+    extracted_path.write_text(read_text_auto(cif_files[0]))
+    original = parse_mmcif(cif_path).atom_array
+    extracted = parse_mmcif(extracted_path).atom_array
+    assert len(set(original.label_asym_id)) > 1
+    assert set(extracted.label_asym_id) == {"A"}
+    assert len(extracted) < len(original)
+
+    output_path = write_prepared_query_sets(query_set, tmp_path / "output")["target"]
+    payload = json.loads(output_path.read_text())
+    serialized = payload["queries"]["target"]["chains"][0]["templates"]
+    assert serialized[0]["mmcif_path"] == "templates/1a8q_A.cif.zst"
+    assert "chain_id" not in serialized[0]
+    relocated = InferenceQuerySet.from_json(output_path)
+    assert relocated.queries["target"].chains[0].templates[0].mmcif_path.is_file()
 
 
 def test_restore_prepared_templates_rebuilds_native_runtime_cache(tmp_path):
@@ -262,7 +280,7 @@ def test_restore_prepared_templates_rebuilds_native_runtime_cache(tmp_path):
         entry = cache["1abc_A"].item()
     assert entry["index"] == 4
     np.testing.assert_array_equal(entry["idx_map"], [[0, 2], [1, 3]])
-    assert (config.structure_directory / "1abc.cif").read_text() == "data_template\n"
+    assert Path(entry["cif_path"]).read_text() == "data_template\n"
 
 
 def test_clear_template_inputs_disables_prepared_and_raw_sources(tmp_path):
@@ -292,6 +310,24 @@ def test_clear_template_inputs_disables_prepared_and_raw_sources(tmp_path):
                         }
                     ]
                 },
+                "inline": {
+                    "chains": [
+                        {
+                            "molecule_type": "protein",
+                            "chain_ids": ["C"],
+                            "sequence": "KLMN",
+                            "templates": [
+                                {
+                                    "entry_id": "1abc",
+                                    "mmcif_path": cif_path,
+                                    "query_indices": [0],
+                                    "template_indices": [0],
+                                    "source_index": 0,
+                                }
+                            ],
+                        }
+                    ]
+                },
             }
         }
     )
@@ -305,3 +341,4 @@ def test_clear_template_inputs_disables_prepared_and_raw_sources(tmp_path):
         assert chain.template_entry_chain_ids == []
         assert chain.template_cif_paths is None
         assert chain.template_cif_chain_ids is None
+        assert chain.templates is None

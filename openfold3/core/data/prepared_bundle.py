@@ -12,17 +12,20 @@ bundle by inference-only jobs and are never part of the persistent interface.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
 import tempfile
 from datetime import date, datetime
+from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
-from pydantic import BaseModel, FilePath, field_validator, model_validator
+from biotite.structure.io import pdbx
+from pydantic import BaseModel
 
 from openfold3.core.config.msa_pipeline_configs import (
     MsaSampleProcessorInputInference,
@@ -40,6 +43,7 @@ from openfold3.projects.of3_all_atom.config.dataset_config_components import (
 )
 from openfold3.projects.of3_all_atom.config.inference_query_format import (
     InferenceQuerySet,
+    PreparedTemplate,
 )
 
 if TYPE_CHECKING:
@@ -103,6 +107,10 @@ def query_set_to_portable_dict(
         for chain in query["chains"]:
             for field in _RESOURCE_FIELDS & chain.keys():
                 chain[field] = _relative_resource(chain[field], owner_directory)
+            for template in chain.get("templates") or []:
+                template["mmcif_path"] = _relative_resource(
+                    template["mmcif_path"], owner_directory
+                )
     return data
 
 
@@ -284,6 +292,27 @@ def _normalise_release_date(value: Any) -> date | None:
     return date.fromisoformat(str(value)[:10])
 
 
+def extract_single_chain_mmcif(source_path: Path, chain_id: str) -> str:
+    """Return an mmCIF containing coordinates for one label-asym chain only."""
+    cif_file = pdbx.CIFFile.read(StringIO(read_text_auto(source_path)))
+    cif_file = copy.deepcopy(cif_file)
+    atom_site = cif_file.block["atom_site"]
+    chain_mask = atom_site["label_asym_id"].as_array() == chain_id
+    if not np.any(chain_mask):
+        available = sorted(set(atom_site["label_asym_id"].as_array().tolist()))
+        raise ValueError(
+            f"Template chain {chain_id!r} is absent from {source_path}; "
+            f"available label_asym_id values: {available}"
+        )
+
+    cif_file.block["atom_site"] = pdbx.CIFCategory(
+        {name: column.as_array()[chain_mask] for name, column in atom_site.items()}
+    )
+    output = StringIO()
+    cif_file.write(output)
+    return output.getvalue()
+
+
 def materialise_templates(
     query_set: InferenceQuerySet,
     output_root: Path,
@@ -291,10 +320,10 @@ def materialise_templates(
     *,
     compress: bool = True,
 ) -> None:
-    """Export native template caches as editable sidecars plus full mmCIF files."""
+    """Embed finalized templates and export one single-chain mmCIF per template."""
     for query_name, query in query_set.queries.items():
         job_directory = Path(output_root) / sanitise_job_name(query_name)
-        msa_directory = job_directory / "msas"
+        template_directory = job_directory / "templates"
         for chain in query.chains:
             cache_path = chain.template_alignment_file_path
             template_ids = chain.template_entry_chain_ids or []
@@ -303,15 +332,15 @@ def materialise_templates(
                 chain.template_entry_chain_ids = []
                 chain.template_cif_paths = None
                 chain.template_cif_chain_ids = None
+                chain.templates = []
                 chain.prepared_template_file_path = None
                 continue
 
             with np.load(cache_path, allow_pickle=True) as cache_npz:
                 cache = {key: value.item() for key, value in cache_npz.items()}
 
-            entity_id = sanitise_job_name(str(chain.chain_ids[0]))
             prepared_templates = []
-            cif_paths_by_entry: dict[str, Path] = {}
+            cif_paths_by_template: dict[tuple[str, str], Path] = {}
             for template_id in template_ids:
                 if template_id not in cache:
                     raise ValueError(
@@ -337,25 +366,25 @@ def materialise_templates(
                         f"Structure for template {template_id} not found: {source_path}"
                     )
 
-                cif_path = cif_paths_by_entry.get(entry_id)
+                template_key = (entry_id, chain_id)
+                cif_path = cif_paths_by_template.get(template_key)
                 if cif_path is None:
                     suffix = ".cif.zst" if compress else ".cif"
-                    cif_path = msa_directory / (
-                        f"{sanitise_job_name(query_name)}__{entity_id}_template_"
-                        f"{sanitise_job_name(entry_id)}{suffix}"
+                    cif_path = template_directory / (
+                        f"{sanitise_job_name(entry_id)}_"
+                        f"{sanitise_job_name(chain_id)}{suffix}"
                     )
-                    cif_text = read_text_auto(source_path)
+                    cif_text = extract_single_chain_mmcif(source_path, chain_id)
                     if compress:
                         write_zstd_text(cif_path, cif_text)
                     else:
                         atomic_write_text(cif_path, cif_text)
-                    cif_paths_by_entry[entry_id] = cif_path
+                    cif_paths_by_template[template_key] = cif_path
 
                 idx_map = np.asarray(entry["idx_map"], dtype=int)
                 prepared_templates.append(
                     PreparedTemplate(
                         entry_id=entry_id,
-                        chain_id=chain_id,
                         mmcif_path=cif_path,
                         query_indices=idx_map[:, 0].tolist(),
                         template_indices=idx_map[:, 1].tolist(),
@@ -364,11 +393,8 @@ def materialise_templates(
                     )
                 )
 
-            sidecar_path = msa_directory / (
-                f"{sanitise_job_name(query_name)}__{entity_id}_templates.json"
-            )
-            PreparedTemplateSet(templates=prepared_templates).write_json(sidecar_path)
-            chain.prepared_template_file_path = sidecar_path
+            chain.templates = prepared_templates
+            chain.prepared_template_file_path = None
             chain.template_alignment_file_path = None
             chain.template_entry_chain_ids = []
             chain.template_cif_paths = None
@@ -383,6 +409,7 @@ def clear_template_inputs(query_set: InferenceQuerySet) -> None:
             chain.template_entry_chain_ids = []
             chain.template_cif_paths = None
             chain.template_cif_chain_ids = None
+            chain.templates = None
             chain.prepared_template_file_path = None
 
 
@@ -398,28 +425,38 @@ def restore_prepared_templates(
     structure_directory.mkdir(parents=True, exist_ok=True)
     cache_directory.mkdir(parents=True, exist_ok=True)
 
-    restored_structures: dict[str, str] = {}
     for query_name, query in query_set.queries.items():
         for chain_index, chain in enumerate(query.chains):
-            sidecar_path = chain.prepared_template_file_path
-            if sidecar_path is None:
+            templates = chain.templates
+            if templates is None and chain.prepared_template_file_path is not None:
+                templates = PreparedTemplateSet.from_json(
+                    chain.prepared_template_file_path
+                ).templates
+            if not templates:
                 continue
-            template_set = PreparedTemplateSet.from_json(sidecar_path)
             cache = {}
             template_ids = []
-            for template in template_set.templates:
-                template_id = f"{template.entry_id}_{template.chain_id}"
+            for template_index, template in enumerate(templates):
                 cif_text = read_text_auto(template.mmcif_path)
-                previous = restored_structures.get(template.entry_id)
-                if previous is not None and previous != cif_text:
-                    raise ValueError(
-                        f"Conflicting mmCIF contents for template entry "
-                        f"{template.entry_id!r}"
-                    )
-                restored_structures[template.entry_id] = cif_text
-                structure_path = structure_directory / f"{template.entry_id}.cif"
-                if not structure_path.exists():
-                    atomic_write_text(structure_path, cif_text)
+                structure_path = structure_directory / (
+                    f"{sanitise_job_name(query_name)}_{chain_index}_{template_index}_"
+                    f"{sanitise_job_name(template.entry_id)}.cif"
+                )
+                atomic_write_text(structure_path, cif_text)
+
+                template_chain_id = template.chain_id
+                if template_chain_id is None:
+                    cif_file = pdbx.CIFFile.read(structure_path)
+                    chain_ids = np.unique(
+                        cif_file.block["atom_site"]["label_asym_id"].as_array()
+                    ).tolist()
+                    if len(chain_ids) != 1:
+                        raise ValueError(
+                            f"Prepared template {template.mmcif_path} must contain "
+                            f"exactly one label_asym_id; found {chain_ids}"
+                        )
+                    template_chain_id = str(chain_ids[0])
+                template_id = f"{template.entry_id}_{template_chain_id}"
 
                 cache[template_id] = {
                     "index": template.source_index,
@@ -431,6 +468,7 @@ def restore_prepared_templates(
                     "idx_map": np.column_stack(
                         [template.query_indices, template.template_indices]
                     ).astype(int),
+                    "cif_path": str(structure_path),
                 }
                 template_ids.append(template_id)
 
@@ -440,6 +478,7 @@ def restore_prepared_templates(
             np.savez_compressed(cache_path, **cache)
             chain.template_alignment_file_path = cache_path
             chain.template_entry_chain_ids = template_ids
+            chain.templates = None
             chain.prepared_template_file_path = None
 
     config.output_directory = runtime_directory
@@ -453,7 +492,10 @@ def validate_inference_only_templates(query_set: InferenceQuerySet) -> None:
     """Reject raw template inputs that require the disabled data pipeline."""
     for query_name, query in query_set.queries.items():
         for chain in query.chains:
-            if chain.prepared_template_file_path is not None:
+            if (
+                chain.templates is not None
+                or chain.prepared_template_file_path is not None
+            ):
                 continue
             if (
                 chain.template_alignment_file_path is not None
@@ -462,37 +504,8 @@ def validate_inference_only_templates(query_set: InferenceQuerySet) -> None:
                 raise ValueError(
                     f"Query {query_name!r}, chain {chain.chain_ids} contains raw "
                     "template inputs. Run once with --run-data-pipeline=true to "
-                    "create a portable prepared_template_file_path sidecar."
+                    "create portable inline templates."
                 )
-
-
-class PreparedTemplate(BaseModel):
-    """One finalized template used to reconstruct an OpenFold template cache."""
-
-    entry_id: str
-    chain_id: str
-    mmcif_path: FilePath
-    query_indices: list[int]
-    template_indices: list[int]
-    release_date: date | None = None
-    source_index: int
-
-    @field_validator("query_indices", "template_indices")
-    @classmethod
-    def validate_nonnegative_indices(cls, value: list[int]) -> list[int]:
-        if any(index < 0 for index in value):
-            raise ValueError("Template residue indices must be non-negative")
-        return value
-
-    @model_validator(mode="after")
-    def validate_mapping(self) -> PreparedTemplate:
-        if len(self.query_indices) != len(self.template_indices):
-            raise ValueError(
-                "query_indices and template_indices must have equal length"
-            )
-        if not self.query_indices:
-            raise ValueError("A prepared template must map at least one residue")
-        return self
 
 
 class PreparedTemplateSet(BaseModel):

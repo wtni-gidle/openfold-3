@@ -270,7 +270,11 @@ def sample_templates(
                 index=template_cache_entry[template_id]["index"],
                 release_date=template_cache_entry[template_id]["release_date"],
                 idx_map=template_cache_entry[template_id]["idx_map"],
-                # TODO: this will never read cif_path from the cache
+                cif_path=(
+                    Path(template_cache_entry[template_id]["cif_path"])
+                    if template_cache_entry[template_id].get("cif_path") is not None
+                    else None
+                ),
             )
             for template_id in sampled_template_ids
         }

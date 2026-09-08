@@ -109,3 +109,22 @@ def test_sample_templates_cache_directory_gate(
         {k: dataclasses.asdict(v) for k, v in actual.items()},
         {k: dataclasses.asdict(v) for k, v in expected.items()},
     )
+
+
+def test_sample_templates_restores_direct_cif_path(tmp_path):
+    cif_path = tmp_path / "single_chain.cif"
+    cif_path.write_text("data_template\n")
+    cache_entry = dataclasses.replace(_cache_entry(), cif_path=cif_path)
+    cache_npz = write_cache_npz(tmp_path / "chainA.npz", {TEMPLATE_ID: cache_entry})
+
+    actual = sample_templates(
+        assembly_data=_assembly_data(cache_npz),
+        template_cache_directory=tmp_path,
+        n_templates=4,
+        take_top_k=True,
+        chain_id="A",
+        template_structure_array_directory=None,
+        template_file_format="cif",
+    )
+
+    assert actual[TEMPLATE_ID].cif_path == cif_path

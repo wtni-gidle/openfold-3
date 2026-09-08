@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import json
+from datetime import date
 from pathlib import Path
 from typing import Annotated, Any, NamedTuple
 
@@ -75,6 +76,41 @@ class PocketConstraint(BaseModel):
         return self
 
 
+class PreparedTemplate(BaseModel):
+    """Portable, finalized template embedded directly in a chain definition.
+
+    Newly generated bundles contain a single-chain mmCIF and therefore omit
+    ``chain_id``.  The optional field is accepted only so bundles written by the
+    earlier sidecar format can still be read.
+    """
+
+    model_config = {"extra": "forbid"}
+    entry_id: str
+    mmcif_path: FilePath
+    query_indices: list[int]
+    template_indices: list[int]
+    release_date: date | None = None
+    source_index: int
+    chain_id: str | None = None
+
+    @field_validator("query_indices", "template_indices")
+    @classmethod
+    def validate_nonnegative_indices(cls, value: list[int]) -> list[int]:
+        if any(index < 0 for index in value):
+            raise ValueError("Template residue indices must be non-negative")
+        return value
+
+    @model_validator(mode="after")
+    def validate_mapping(self) -> "PreparedTemplate":
+        if len(self.query_indices) != len(self.template_indices):
+            raise ValueError(
+                "query_indices and template_indices must have equal length"
+            )
+        if not self.query_indices:
+            raise ValueError("A prepared template must map at least one residue")
+        return self
+
+
 class Chain(BaseModel):
     model_config = {
         "use_enum_values": False,
@@ -106,6 +142,9 @@ class Chain(BaseModel):
     template_cif_chain_ids: (
         Annotated[list[str | None], BeforeValidator(_ensure_list)] | None
     ) = None
+    templates: Annotated[list[PreparedTemplate], BeforeValidator(_ensure_list)] | None = (
+        None
+    )
     prepared_template_file_path: FilePath | None = None
     sdf_file_path: FilePath | None = None
     cyclic: bool = False
@@ -154,13 +193,14 @@ class Chain(BaseModel):
         template_sources = [
             self.template_alignment_file_path is not None,
             self.template_cif_paths is not None,
+            self.templates is not None,
             self.prepared_template_file_path is not None,
         ]
         if sum(template_sources) > 1:
             raise ValueError(
                 f"Chain {self.chain_ids}: At most one of "
-                "'template_alignment_file_path', 'template_cif_paths', and "
-                "'prepared_template_file_path' may be specified"
+                "'template_alignment_file_path', 'template_cif_paths', 'templates', "
+                "and 'prepared_template_file_path' may be specified"
             )
 
         if self.template_cif_chain_ids is not None:
@@ -264,6 +304,10 @@ class InferenceQuerySet(BaseModel):
             for chain in query.get("chains", []):
                 for field in resource_fields & chain.keys():
                     chain[field] = resolve_resource(chain[field])
+                for template in chain.get("templates") or []:
+                    template["mmcif_path"] = resolve_resource(
+                        template["mmcif_path"]
+                    )
 
         return cls.model_validate(data)
 

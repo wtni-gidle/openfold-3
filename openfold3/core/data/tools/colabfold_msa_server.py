@@ -1071,6 +1071,7 @@ def add_msa_paths_to_iqs(
                 if (
                     chain.template_cif_paths is not None
                     or chain.template_alignment_file_path is not None
+                    or chain.templates is not None
                     or chain.prepared_template_file_path is not None
                 ):
                     continue
