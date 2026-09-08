@@ -216,7 +216,7 @@ def test_materialised_templates_reuse_mmcif_for_duplicate_occurrences(tmp_path):
     assert len(chain.templates) == 2
     assert chain.templates[0].chain_id is None
     assert chain.templates[0].mmcif_path == chain.templates[1].mmcif_path
-    cif_files = list((tmp_path / "output/target/templates").glob("*.cif.zst"))
+    cif_files = list((tmp_path / "output/target/msas").glob("*.cif.zst"))
     assert len(cif_files) == 1
 
     extracted_path = tmp_path / "extracted.cif"
@@ -230,7 +230,7 @@ def test_materialised_templates_reuse_mmcif_for_duplicate_occurrences(tmp_path):
     output_path = write_prepared_query_sets(query_set, tmp_path / "output")["target"]
     payload = json.loads(output_path.read_text())
     serialized = payload["queries"]["target"]["chains"][0]["templates"]
-    assert serialized[0]["mmcif_path"] == "templates/1a8q_A.cif.zst"
+    assert serialized[0]["mmcif_path"] == "msas/1a8q_A.cif.zst"
     assert "chain_id" not in serialized[0]
     relocated = InferenceQuerySet.from_json(output_path)
     assert relocated.queries["target"].chains[0].templates[0].mmcif_path.is_file()

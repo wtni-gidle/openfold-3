@@ -323,7 +323,7 @@ def materialise_templates(
     """Embed finalized templates and export one single-chain mmCIF per template."""
     for query_name, query in query_set.queries.items():
         job_directory = Path(output_root) / sanitise_job_name(query_name)
-        template_directory = job_directory / "templates"
+        template_directory = job_directory / "msas"
         for chain in query.chains:
             cache_path = chain.template_alignment_file_path
             template_ids = chain.template_entry_chain_ids or []
