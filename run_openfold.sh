@@ -88,6 +88,16 @@ if ! command -v "$openfold_bin" >/dev/null 2>&1; then
     exit 1
 fi
 
+# An absolute OPENFOLD_BIN does not activate its Pixi/Conda environment.  Triton
+# 3.6 otherwise fails to discover the CUDA assembler on Blackwell GPUs even
+# when the environment ships a sufficiently new ptxas binary.
+openfold_executable="$(command -v "$openfold_bin")"
+openfold_bin_directory="$(dirname "$openfold_executable")"
+if [[ -x "$openfold_bin_directory/ptxas" ]]; then
+    export TRITON_PTXAS_PATH="${TRITON_PTXAS_PATH:-$openfold_bin_directory/ptxas}"
+    export TRITON_PTXAS_BLACKWELL_PATH="${TRITON_PTXAS_BLACKWELL_PATH:-$openfold_bin_directory/ptxas}"
+fi
+
 if [[ "$run_inference" == "true" ]]; then
     export CUDA_VISIBLE_DEVICES="$gpu_device"
 fi
