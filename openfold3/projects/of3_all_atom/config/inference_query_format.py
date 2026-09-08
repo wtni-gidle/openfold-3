@@ -142,9 +142,9 @@ class Chain(BaseModel):
     template_cif_chain_ids: (
         Annotated[list[str | None], BeforeValidator(_ensure_list)] | None
     ) = None
-    templates: Annotated[list[PreparedTemplate], BeforeValidator(_ensure_list)] | None = (
-        None
-    )
+    templates: (
+        Annotated[list[PreparedTemplate], BeforeValidator(_ensure_list)] | None
+    ) = None
     prepared_template_file_path: FilePath | None = None
     sdf_file_path: FilePath | None = None
     cyclic: bool = False
