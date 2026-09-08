@@ -339,9 +339,10 @@ def materialise_templates(
             with np.load(cache_path, allow_pickle=True) as cache_npz:
                 cache = {key: value.item() for key, value in cache_npz.items()}
 
+            entity_id = sanitise_job_name(str(chain.chain_ids[0]))
             prepared_templates = []
             cif_paths_by_template: dict[tuple[str, str], Path] = {}
-            for template_id in template_ids:
+            for template_index, template_id in enumerate(template_ids):
                 if template_id not in cache:
                     raise ValueError(
                         f"Template {template_id!r} is absent from cache {cache_path}"
@@ -371,8 +372,8 @@ def materialise_templates(
                 if cif_path is None:
                     suffix = ".cif.zst" if compress else ".cif"
                     cif_path = template_directory / (
-                        f"{sanitise_job_name(entry_id)}_"
-                        f"{sanitise_job_name(chain_id)}{suffix}"
+                        f"{sanitise_job_name(query_name)}__{entity_id}_"
+                        f"template_{template_index}{suffix}"
                     )
                     cif_text = extract_single_chain_mmcif(source_path, chain_id)
                     if compress:
