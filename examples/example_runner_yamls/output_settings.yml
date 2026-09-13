@@ -1,5 +1,7 @@
 output_writer_settings:
   # change output format to pdb (default: mmcif):
   structure_format: pdb
+  # Save full confidence scores as compressed NPZ (default); use json for JSON output.
+  full_confidence_output_format: npz
   # Save features (default: False) 
-  write_features: True 
+  write_features: True

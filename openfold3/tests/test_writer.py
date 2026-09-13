@@ -106,7 +106,7 @@ class TestPredictionWriter:
                 / "target"
                 / "summary_confidences"
                 / f"{prefix}_summary_confidences.json",
-                tmp_path / "target" / "full_data" / f"{prefix}_full_data.json",
+                tmp_path / "target" / "full_data" / f"{prefix}_full_data.npz",
             )
             assert all(path.stat().st_size > 0 for path in expected)
             summary = json.loads(expected[1].read_text())
@@ -255,6 +255,31 @@ class TestPredictionWriter:
                 assert actual_full_scores[k].dtype == np.dtype(output_dtype), (
                     f"Expected dtype {output_dtype} for {k}, but got {actual_full_scores[k].dtype}"
                 )
+
+    def test_default_full_confidence_output_is_compressed_float16_npz(
+        self, tmp_path, dummy_confidence_scores
+    ):
+        atom_array = structure.AtomArray(5)
+        atom_array.coord = np.zeros((5, 3))
+        atom_array.chain_id = np.array(["A", "A", "B", "B", "B"])
+        output_prefix = tmp_path / "test"
+        output_writer = OF3OutputWriter(tmp_path)
+
+        output_writer.write_confidence_scores(
+            dummy_confidence_scores,
+            atom_array,
+            output_prefix,
+            output_prefix,
+        )
+
+        output_file = tmp_path / "test_full_data.npz"
+        assert output_file.exists()
+        with np.load(output_file, allow_pickle=False) as full_confidence_scores:
+            assert set(full_confidence_scores.files) == {"plddt", "pde", "pae"}
+            assert all(
+                full_confidence_scores[key].dtype == np.dtype("float16")
+                for key in full_confidence_scores.files
+            )
 
     def test_skip_full_confidence_scores(self, tmp_path, dummy_confidence_scores):
         self.write_confidence_scores(

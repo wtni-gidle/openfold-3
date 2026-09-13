@@ -242,7 +242,7 @@ Configures the format of output files.
 
 **All Options**:
 - `structure_format` *(Literal["pdb", "cif", "cif.gz"])*: Output format (default: `cif`)
-- `full_confidence_output_format` *(Literal["json", "npz"])*: Confidence output format (default: `json`)
+- `full_confidence_output_format` *(Literal["json", "npz"])*: Confidence output format (default: `npz`; set to `json` for JSON output)
 - `full_confidence_output_dtype` *(Literal["float32", "float16"])*: Data type for confidence scores when using npz format (default: `float16`)
 - `write_features` *(bool)*: Write intermediate features (default: `false`)
 - `write_latent_outputs` *(bool)*: Write model intermediate outputs (default: `false`)
@@ -252,7 +252,7 @@ Configures the format of output files.
 ```yaml
 output_writer_settings:
   structure_format: pdb
-  full_confidence_output_format: json
+  full_confidence_output_format: npz
 ```
 
 ---
@@ -336,4 +336,3 @@ For the complete list of default values, see the Pydantic model classes in:
 - [`openfold3/core/data/tools/colabfold_msa_server.py`](https://github.com/aqlaboratory/openfold-3/blob/main/openfold3/core/data/tools/colabfold_msa_server.py) - MSA server settings
 - [`openfold3/core/data/pipelines/preprocessing/template.py`](http://github.com/aqlaboratory/openfold-3/blob/main/openfold3/core/data/pipelines/preprocessing/template.py) - Template preprocessing settings
 - [`openfold3/core/config/pocket_sampling_config.py`](https://github.com/aqlaboratory/openfold-3/blob/main/openfold3/core/config/pocket_sampling_config.py) - Pocket sampling settings
-

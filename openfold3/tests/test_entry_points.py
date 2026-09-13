@@ -902,6 +902,7 @@ class TestUserDefaultRunnerYaml:
 
         assert cfg.user_default_runner_yaml_path is None
         assert cfg.output_writer_settings.structure_format == "cif"
+        assert cfg.output_writer_settings.full_confidence_output_format == "npz"
 
     def test_default_runner_yaml_applied(self, tmp_path, dummy_ckpt_file):
         """Scenario 2: runner.yml in cache → settings applied, path recorded."""

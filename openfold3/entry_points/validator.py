@@ -161,7 +161,7 @@ class OutputWritingSettings(BaseModel):
     """
 
     structure_format: Literal["pdb", "cif", "cif.gz"] = "cif"
-    full_confidence_output_format: Literal["json", "npz"] = "json"
+    full_confidence_output_format: Literal["json", "npz"] = "npz"
     full_confidence_output_dtype: Literal["float16", "float32"] = "float16"
     write_features: bool = False
     write_latent_outputs: bool = False
