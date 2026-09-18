@@ -241,7 +241,7 @@ Configures the format of output files.
 **Pydantic Model**: [`OutputWritingSettings`](https://github.com/aqlaboratory/openfold-3/blob/main/openfold3/entry_points/validator.py#L141)
 
 **All Options**:
-- `structure_format` *(Literal["pdb", "cif", "cif.gz"])*: Output format (default: `cif`)
+- `structure_format` *(Literal["pdb", "cif", "cif.gz"])*: Native writer output format (default: `cif`). The EnsembleFold `predict` wrapper requires `cif` when inference is enabled.
 - `full_confidence_output_format` *(Literal["json", "npz"])*: Confidence output format (default: `npz`; set to `json` for JSON output)
 - `full_confidence_output_dtype` *(Literal["float32", "float16"])*: Data type for confidence scores when using npz format (default: `float16`)
 - `write_features` *(bool)*: Write intermediate features (default: `false`)
@@ -251,7 +251,7 @@ Configures the format of output files.
 **Example**:
 ```yaml
 output_writer_settings:
-  structure_format: pdb
+  structure_format: cif
   full_confidence_output_format: npz
 ```
 

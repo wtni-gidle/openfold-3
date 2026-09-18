@@ -343,6 +343,14 @@ def predict(
         user_default_runner_yaml_path=user_default_runner_path,
         **runner_args,
     )
+    if (
+        run_inference
+        and expt_config.output_writer_settings.structure_format != "cif"
+    ):
+        raise click.UsageError(
+            "EnsembleFold wrapper structure_format must be cif; "
+            "update output_writer_settings.structure_format in runner YAML."
+        )
     msa_compute_settings = expt_config.msa_computation_settings
     if msa_compute_settings.msa_output_directory is None:
         msa_compute_settings.save_openfold_outputs = False

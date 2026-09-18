@@ -259,12 +259,11 @@ Seeding behavior is controlled in the following priority:
 
 ---
 
-#### 📦 Output in PDB Format
-Change the structure output format from `cif` to `pdb` using [`output_writer_settings`](https://github.com/aqlaboratory/openfold-3/blob/aadafc70bcb9e609954161660314fcf133d5f7c4/openfold3/entry_points/validator.py#L170):
-```yaml
-output_writer_settings:
-  structure_format: pdb    # Default: cif
-```
+#### 📦 Structure output format
+The EnsembleFold `predict` wrapper writes structures as CIF and rejects other
+`output_writer_settings.structure_format` values during inference. The native
+`OF3OutputWriter` library API continues to support `pdb`, `cif`, and `cif.gz`
+for direct library use.
 
 ---
 
@@ -484,22 +483,22 @@ datset_config_kwargs:
 The inference pipeline creates a dedicated output directory for each query, named by the corresponding query key (for example, `query_1` or `3hfm` when a PDB ID is provided). Prediction results are stored there. By default, saved MSA records are stored under `<output_dir>/msas`.
 
 (41-prediction-outputs)=
-### 4.1 Prediction Outputs (`query/seed/`)
+### 4.1 Prediction Outputs
 
-Each seed produces `l` (number of diffusion samples) structure predictions, and their associated confidence scores, stored in subdirectories named after the query, seed and the index of the diffusion sample, e.g.:
+Each seed produces `l` diffusion samples. Sample numbers retain their original
+zero-based diffusion order:
 ```bash
-<output_directory>
- ├── query_1
-	 └── seed_42
-        ├── query_1_seed_42_sample_1_model.cif
-        ├── query_1_seed_42_sample_1_confidences.json
-        ├── query_1_seed_42_sample_1_confidences_aggregated.json
-        └── timing.json 
+<output_directory>/query_1/
+├── models/seed-42_sample-0_model.cif
+├── summary_confidences/seed-42_sample-0_summary_confidences.json
+├── full_data/seed-42_sample-0_full_data.npz
+└── timing.json
 ```
 
-- `*_model.cif` (or `.pdb`): Final predicted 3D structure (with per-atom pLDDT in B-factor if `.pdb`).
+- `models/*_model.cif`: Final predicted 3D structure.
   
-- `*_confidences.json`: Per-atom confidence scores:
+- `full_data/*_full_data.npz`: Per-atom confidence scores, compressed and
+  stored as float16 by default (`json` and float32 remain configurable):
 
   - `plddt`: Predicted Local Distance Difference Test
   
@@ -507,7 +506,7 @@ Each seed produces `l` (number of diffusion samples) structure predictions, and 
 
   - `pde`: Predicted Distance Error
 
-- `*_confidences_aggregated.json`: Aggregated metric:
+- `summary_confidences/*_summary_confidences.json`: Aggregated metrics:
 
   - `avg_plddt` - Average pLDDT over structure
 

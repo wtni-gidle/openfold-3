@@ -76,6 +76,113 @@ def minimal_query_json(tmp_path: Path) -> Path:
     return query_json
 
 
+@pytest.mark.parametrize("requested", ["pdb", "cif.gz"])
+@pytest.mark.parametrize("cached", [False, True])
+def test_wrapper_rejects_non_cif(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    requested: str,
+    cached: bool,
+) -> None:
+    class StopAfterConfig(Exception):
+        pass
+
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    monkeypatch.setenv("OPENFOLD_CACHE", str(cache))
+    query = tmp_path / "query.json"
+    query.write_text("{}", encoding="utf-8")
+    checkpoint = tmp_path / "model.ckpt"
+    checkpoint.touch()
+    settings = (cache if cached else tmp_path) / "runner.yml"
+    settings.write_text(
+        "output_writer_settings:\n"
+        f"  structure_format: {requested}\n",
+        encoding="utf-8",
+    )
+    arguments = [
+        "predict",
+        "--query_json",
+        str(query),
+        "--inference_ckpt_path",
+        str(checkpoint),
+    ]
+    if not cached:
+        arguments.extend(["--runner_yaml", str(settings)])
+
+    with (
+        patch("openfold3.run_openfold._configure_torch_backend"),
+        patch("openfold3.run_openfold._enable_tf32"),
+        patch(
+            "openfold3.entry_points.experiment_runner.InferenceExperimentRunner",
+            side_effect=StopAfterConfig,
+        ) as runner,
+    ):
+        result = CliRunner().invoke(run_openfold.cli, arguments)
+
+    assert result.exit_code == 2, result.output
+    assert "structure_format must be cif" in result.output
+    runner.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("requested", "run_inference"),
+    [(None, True), ("cif", True), ("pdb", False)],
+)
+def test_wrapper_accepts_cif_and_data_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    requested: str | None,
+    run_inference: bool,
+) -> None:
+    class StopAfterConfig(Exception):
+        pass
+
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    monkeypatch.setenv("OPENFOLD_CACHE", str(cache))
+    query = tmp_path / "query.json"
+    query.write_text("{}", encoding="utf-8")
+    checkpoint = tmp_path / "model.ckpt"
+    checkpoint.touch()
+    settings = tmp_path / "runner.yml"
+    contents = (
+        "output_writer_settings:\n"
+        "  full_confidence_output_dtype: float32\n"
+    )
+    if requested is not None:
+        contents += f"  structure_format: {requested}\n"
+    settings.write_text(contents, encoding="utf-8")
+
+    with (
+        patch("openfold3.run_openfold._configure_torch_backend"),
+        patch("openfold3.run_openfold._enable_tf32"),
+        patch(
+            "openfold3.entry_points.experiment_runner.InferenceExperimentRunner",
+            side_effect=StopAfterConfig,
+        ) as runner,
+    ):
+        result = CliRunner().invoke(
+            run_openfold.cli,
+            [
+                "predict",
+                "--query_json",
+                str(query),
+                "--runner_yaml",
+                str(settings),
+                "--inference_ckpt_path",
+                str(checkpoint),
+                "--run_inference",
+                str(run_inference).lower(),
+            ],
+        )
+
+    assert isinstance(result.exception, StopAfterConfig), result.output
+    output_settings = runner.call_args.args[0].output_writer_settings
+    assert output_settings.structure_format == (requested or "cif")
+    assert output_settings.full_confidence_output_dtype == "float32"
+
+
 def _create_fake_file(path: Path) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
@@ -807,8 +914,8 @@ class TestTemplatePreprocessorSettings:
 
 
 class TestRemoveQuerySetDuplicates:
-    @pytest.fixture
-    def dummy_output_path(self, tmp_path):
+    @pytest.fixture(params=["json", "npz"])
+    def dummy_output_path(self, tmp_path, request):
         expected_fnames = []
         completed = {
             "query_1": {42: (0, 1), 43: (0, 1)},
@@ -823,16 +930,17 @@ class TestRemoveQuerySetDuplicates:
                             f"{query_id}/models/{prefix}_model.cif",
                             f"{query_id}/summary_confidences/"
                             f"{prefix}_summary_confidences.json",
-                            f"{query_id}/full_data/{prefix}_full_data.json",
+                            f"{query_id}/full_data/{prefix}_full_data.{request.param}",
                         ]
                     )
 
         for fname in expected_fnames:
             _create_fake_file(tmp_path / fname)
 
-        return tmp_path
+        return tmp_path, request.param
 
     def test_remove_duplicates(self, dummy_ckpt_file, dummy_output_path, tmp_path):
+        dummy_output_path, full_confidence_format = dummy_output_path
         input_query_set = InferenceQuerySet.model_validate(
             {
                 "queries": {
@@ -867,13 +975,16 @@ class TestRemoveQuerySetDuplicates:
             }
         )
 
-        experiment_config = InferenceExperimentConfig.model_validate(
-            {
-                "experiment_settings": {"seeds": [42, 43]},
-                "inference_ckpt_path": dummy_ckpt_file,
-                "cache_path": tmp_path / "cache",
+        config = {
+            "experiment_settings": {"seeds": [42, 43]},
+            "inference_ckpt_path": dummy_ckpt_file,
+            "cache_path": tmp_path / "cache",
+        }
+        if full_confidence_format == "json":
+            config["output_writer_settings"] = {
+                "full_confidence_output_format": "json"
             }
-        )
+        experiment_config = InferenceExperimentConfig.model_validate(config)
         expt_runner = InferenceExperimentRunner(
             experiment_config, num_diffusion_samples=2, output_dir=dummy_output_path
         )
