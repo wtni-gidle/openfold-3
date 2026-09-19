@@ -114,15 +114,8 @@ def query_set_to_portable_dict(
     return data
 
 
-def write_prepared_query_sets(
-    query_set: InferenceQuerySet, output_root: Path
-) -> dict[str, Path]:
-    """Write one portable ``<name>_data.json`` for every query.
-
-    The function expects resource materialization to have happened already.  It
-    splits multi-query inputs so GPU jobs and seeds can be scheduled independently.
-    """
-    output_root = Path(output_root)
+def validate_prepared_query_names(query_set: InferenceQuerySet) -> dict[str, str]:
+    """Map safe names to original names, rejecting ambiguous output locations."""
     safe_names: dict[str, str] = {}
     for name in query_set.queries:
         safe = sanitise_job_name(name)
@@ -132,6 +125,19 @@ def write_prepared_query_sets(
                 f"Query names {previous!r} and {name!r} both map to {safe!r}"
             )
         safe_names[safe] = name
+    return safe_names
+
+
+def write_prepared_query_sets(
+    query_set: InferenceQuerySet, output_root: Path
+) -> dict[str, Path]:
+    """Write one portable ``<name>_data.json`` for every query.
+
+    The function expects resource materialization to have happened already.  It
+    splits multi-query inputs so GPU jobs and seeds can be scheduled independently.
+    """
+    output_root = Path(output_root)
+    safe_names = validate_prepared_query_names(query_set)
 
     outputs = {}
     for safe, original in safe_names.items():

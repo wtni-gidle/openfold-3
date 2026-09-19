@@ -8,6 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
+from click.testing import CliRunner
 
 from openfold3.core.config.msa_pipeline_configs import (
     MsaSampleProcessorInputInference,
@@ -34,6 +36,42 @@ from openfold3.projects.of3_all_atom.config.dataset_config_components import (
 from openfold3.projects.of3_all_atom.config.inference_query_format import (
     InferenceQuerySet,
 )
+
+
+@pytest.mark.parametrize("write_input_json", [True, False])
+@pytest.mark.parametrize("stages", [(True, False), (False, True), (True, True)])
+def test_predict_rejects_colliding_names_before_preparation(
+    tmp_path, monkeypatch, write_input_json, stages
+):
+    from openfold3 import run_openfold
+    from openfold3.entry_points import validator
+
+    source = tmp_path / "queries.json"
+    chain = {"molecule_type": "protein", "chain_ids": ["A"], "sequence": "ACDE"}
+    source.write_text(
+        json.dumps({"queries": {name: {"chains": [chain]} for name in ("a b", "a_b")}})
+    )
+    original = source.read_bytes()
+    output = tmp_path / "out"
+
+    def forbidden_config(**kwargs):
+        # Config/runner construction can resolve assets and create directories.
+        raise RuntimeError("reached runtime configuration before name validation")
+
+    monkeypatch.setattr(validator, "InferenceExperimentConfig", forbidden_config)
+    result = CliRunner().invoke(
+        run_openfold.cli,
+        [
+            "predict", "--query-json", str(source), "--output-dir", str(output),
+            "--run-data-pipeline", str(stages[0]), "--run-inference", str(stages[1]),
+            "--write-input-json", str(write_input_json), "--use_tf32", "false",
+        ],
+    )
+
+    assert isinstance(result.exception, ValueError), repr(result.exception)
+    assert "both map to 'a_b'" in str(result.exception)
+    assert not output.exists()
+    assert source.read_bytes() == original
 
 
 def test_a3m_round_trip_preserves_alignment_and_deletion_matrix(tmp_path):

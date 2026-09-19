@@ -91,7 +91,7 @@ def test_wrapper_rejects_non_cif(
     cache.mkdir()
     monkeypatch.setenv("OPENFOLD_CACHE", str(cache))
     query = tmp_path / "query.json"
-    query.write_text("{}", encoding="utf-8")
+    query.write_text('{"queries": {"target": {"chains": []}}}', encoding="utf-8")
     checkpoint = tmp_path / "model.ckpt"
     checkpoint.touch()
     settings = (cache if cached else tmp_path) / "runner.yml"
@@ -142,7 +142,7 @@ def test_wrapper_accepts_cif_and_data_only(
     cache.mkdir()
     monkeypatch.setenv("OPENFOLD_CACHE", str(cache))
     query = tmp_path / "query.json"
-    query.write_text("{}", encoding="utf-8")
+    query.write_text('{"queries": {"target": {"chains": []}}}', encoding="utf-8")
     checkpoint = tmp_path / "model.ckpt"
     checkpoint.touch()
     settings = tmp_path / "runner.yml"

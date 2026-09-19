@@ -298,6 +298,7 @@ def predict(
         materialise_templates,
         restore_prepared_templates,
         validate_inference_only_templates,
+        validate_prepared_query_names,
         write_prepared_query_sets,
     )
     from openfold3.entry_points.experiment_runner import (
@@ -309,6 +310,11 @@ def predict(
     from openfold3.projects.of3_all_atom.config.inference_query_format import (
         InferenceQuerySet,
     )
+
+    # Reject ambiguous output paths before config/runner construction can resolve
+    # assets or create directories, including when snapshots are disabled.
+    query_set = InferenceQuerySet.from_json(query_json)
+    validate_prepared_query_names(query_set)
 
     logging.basicConfig(level=logging.INFO)
 
@@ -372,8 +378,6 @@ def predict(
         model_seeds=explicit_seeds,
     )
 
-    # Load inference query set
-    query_set = InferenceQuerySet.from_json(query_json)
     if (
         explicit_seeds is not None
         or num_model_seeds is not None
