@@ -91,13 +91,15 @@ def test_wrapper_rejects_non_cif(
     cache.mkdir()
     monkeypatch.setenv("OPENFOLD_CACHE", str(cache))
     query = tmp_path / "query.json"
-    query.write_text('{"queries": {"target": {"chains": []}}}', encoding="utf-8")
+    query.write_text(
+        '{"name":"target","sequences":[{"protein":{"id":"A","sequence":"ACDE"}}]}',
+        encoding="utf-8",
+    )
     checkpoint = tmp_path / "model.ckpt"
     checkpoint.touch()
     settings = (cache if cached else tmp_path) / "runner.yml"
     settings.write_text(
-        "output_writer_settings:\n"
-        f"  structure_format: {requested}\n",
+        f"output_writer_settings:\n  structure_format: {requested}\n",
         encoding="utf-8",
     )
     arguments = [
@@ -142,14 +144,14 @@ def test_wrapper_accepts_cif_and_data_only(
     cache.mkdir()
     monkeypatch.setenv("OPENFOLD_CACHE", str(cache))
     query = tmp_path / "query.json"
-    query.write_text('{"queries": {"target": {"chains": []}}}', encoding="utf-8")
+    query.write_text(
+        '{"name":"target","sequences":[{"protein":{"id":"A","sequence":"ACDE"}}]}',
+        encoding="utf-8",
+    )
     checkpoint = tmp_path / "model.ckpt"
     checkpoint.touch()
     settings = tmp_path / "runner.yml"
-    contents = (
-        "output_writer_settings:\n"
-        "  full_confidence_output_dtype: float32\n"
-    )
+    contents = "output_writer_settings:\n  full_confidence_output_dtype: float32\n"
     if requested is not None:
         contents += f"  structure_format: {requested}\n"
     settings.write_text(contents, encoding="utf-8")
@@ -702,6 +704,9 @@ class TestInferenceCommandLineSettings:
     def test_predict_calls_cleanup_after_failure(
         self, minimal_query_json, dummy_ckpt_file
     ):
+        minimal_query_json.write_text(
+            '{"name":"query","sequences":[{"protein":{"id":"A","sequence":"TEST"}}]}'
+        )
         with (
             patch(
                 "openfold3.entry_points.experiment_runner.InferenceExperimentRunner"
@@ -914,6 +919,79 @@ class TestTemplatePreprocessorSettings:
 
 
 class TestRemoveQuerySetDuplicates:
+    @pytest.mark.parametrize("missing_kind", ["missing", "empty"])
+    def test_resume_metadata_and_whole_seed_execution(
+        self, tmp_path, dummy_ckpt_file, monkeypatch, missing_kind
+    ):
+        query_set = InferenceQuerySet.model_validate({
+            "queries": {
+                "job": {"chains": [{
+                    "molecule_type": "protein", "chain_ids": ["A"],
+                    "sequence": "AAAA",
+                }]}
+            }
+        })
+        config = InferenceExperimentConfig.model_validate({
+            "experiment_settings": {"seeds": [42, 43], "skip_existing": True},
+            "inference_ckpt_path": dummy_ckpt_file,
+            "cache_path": tmp_path / "cache",
+            "output_writer_settings": {
+                "full_confidence_output_format": "npz",
+                "write_features": True, "write_latent_outputs": True,
+            },
+        })
+        runner = InferenceExperimentRunner(config, num_diffusion_samples=2, output_dir=tmp_path)
+        preserved = []
+        for seed in (42, 43):
+            paths = []
+            for sample in (0, 1):
+                prefix = f"seed-{seed}_sample-{sample}"
+                paths.extend([
+                    tmp_path / "job/models" / f"{prefix}_model.cif",
+                    tmp_path / "job/summary_confidences" / f"{prefix}_summary_confidences.json",
+                    tmp_path / "job/full_data" / f"{prefix}_full_data.npz",
+                ])
+            paths.extend([
+                tmp_path / "job/features" / f"seed-{seed}_features.pt",
+                tmp_path / "job/latents" / f"seed-{seed}_latent_outputs.pt",
+            ])
+            for path in paths:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"nonempty but not parseable")
+            if seed == 42:
+                preserved = paths
+
+        query_set.queries["job"].chains[0].sequence = "CCCC"
+        with patch.object(Path, "open", side_effect=AssertionError("no content reads")):
+            assert runner.pending_query_groups(query_set) == []
+
+        incomplete = tmp_path / "job/full_data/seed-43_sample-1_full_data.npz"
+        if missing_kind == "missing":
+            incomplete.unlink()
+        else:
+            incomplete.write_bytes(b"")
+        groups = runner.pending_query_groups(query_set)
+        assert [(seeds, list(queries.queries)) for seeds, queries in groups] == [([43], ["job"])]
+
+        calls = []
+        class CpuTrainer:
+            def predict(self, *, model, datamodule, return_predictions):
+                calls.append((datamodule, runner.num_diffusion_samples))
+
+        monkeypatch.setattr(InferenceExperimentRunner, "trainer", property(lambda _: CpuTrainer()))
+        monkeypatch.setattr(InferenceExperimentRunner, "lightning_module", property(lambda _: None))
+        monkeypatch.setattr(InferenceExperimentRunner, "lightning_data_module", property(lambda self: tuple(self.seeds)))
+        runner.run(query_set)
+        assert calls == [((43,), 2)]
+        assert all(path.read_bytes() == b"nonempty but not parseable" for path in preserved)
+
+        incomplete.write_bytes(b"restored")
+        for name in ("features/seed-43_features.pt", "latents/seed-43_latent_outputs.pt"):
+            path = tmp_path / "job" / name
+            path.write_bytes(b"")
+            assert [(seeds, list(queries.queries)) for seeds, queries in runner.pending_query_groups(query_set)] == [([43], ["job"])]
+            path.write_bytes(b"restored")
+
     @pytest.fixture(params=["json", "npz"])
     def dummy_output_path(self, tmp_path, request):
         expected_fnames = []
@@ -939,7 +1017,7 @@ class TestRemoveQuerySetDuplicates:
 
         return tmp_path, request.param
 
-    def test_remove_duplicates(self, dummy_ckpt_file, dummy_output_path, tmp_path):
+    def test_remove_duplicates(self, dummy_ckpt_file, dummy_output_path, tmp_path, monkeypatch):
         dummy_output_path, full_confidence_format = dummy_output_path
         input_query_set = InferenceQuerySet.model_validate(
             {
@@ -976,14 +1054,12 @@ class TestRemoveQuerySetDuplicates:
         )
 
         config = {
-            "experiment_settings": {"seeds": [42, 43]},
+            "experiment_settings": {"seeds": [42, 43], "skip_existing": True},
             "inference_ckpt_path": dummy_ckpt_file,
             "cache_path": tmp_path / "cache",
         }
         if full_confidence_format == "json":
-            config["output_writer_settings"] = {
-                "full_confidence_output_format": "json"
-            }
+            config["output_writer_settings"] = {"full_confidence_output_format": "json"}
         experiment_config = InferenceExperimentConfig.model_validate(config)
         expt_runner = InferenceExperimentRunner(
             experiment_config, num_diffusion_samples=2, output_dir=dummy_output_path
@@ -1002,6 +1078,27 @@ class TestRemoveQuerySetDuplicates:
             (43,): {"query_2"},
             (42, 43): {"query_3"},
         }
+
+        calls = []
+
+        class CpuTrainer:
+            def predict(self, *, model, datamodule, return_predictions):
+                job_config = datamodule.datasets[0].config
+                calls.append((
+                    list(job_config.seeds), list(job_config.query_set.queries),
+                    expt_runner.num_diffusion_samples,
+                ))
+
+        monkeypatch.setattr(
+            "openfold3.entry_points.experiment_runner.InferenceDataModule",
+            lambda config, **kwargs: config,
+        )
+        monkeypatch.setattr(InferenceExperimentRunner, "trainer", property(lambda _: CpuTrainer()))
+        monkeypatch.setattr(InferenceExperimentRunner, "lightning_module", property(lambda _: None))
+        expt_runner.run(input_query_set)
+        assert calls == [([43], ["query_2"], 2), ([42, 43], ["query_3"], 2)]
+        expt_runner.set_model_seeds([91])
+        assert expt_runner.data_module_config.datasets[0].config.seeds == [91]
 
 
 class TestUserDefaultRunnerYaml:

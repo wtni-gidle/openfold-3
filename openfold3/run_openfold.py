@@ -200,12 +200,13 @@ def train(
     help="Run model inference.",
 )
 @click.option(
+    "-J",
     "--write-input-json",
     "--write_input_json",
     type=bool,
-    default=True,
+    default=None,
     show_default=True,
-    help="Write one <query>_data.json prepared bundle per query.",
+    help="Write an AF3-style <query>_data.json. Default follows run-data-pipeline.",
 )
 @click.option(
     "--compress-fold-input",
@@ -247,7 +248,7 @@ def predict(
     output_dir: Path | None = None,
     run_data_pipeline: bool = True,
     run_inference: bool = True,
-    write_input_json: bool = True,
+    write_input_json: bool | None = None,
     compress_fold_input: bool = True,
     skip: bool | None = None,
     max_template_date=None,
@@ -294,12 +295,14 @@ def predict(
     from openfold3.core.data.framework.data_module import InferenceDataModule
     from openfold3.core.data.prepared_bundle import (
         clear_template_inputs,
+        configure_af3_msa_sources,
+        load_af3_query_set,
         materialise_msas,
         materialise_templates,
         restore_prepared_templates,
         validate_inference_only_templates,
         validate_prepared_query_names,
-        write_prepared_query_sets,
+        write_af3_query_sets,
     )
     from openfold3.entry_points.experiment_runner import (
         InferenceExperimentRunner,
@@ -307,14 +310,24 @@ def predict(
     from openfold3.entry_points.validator import (
         InferenceExperimentConfig,
     )
-    from openfold3.projects.of3_all_atom.config.inference_query_format import (
-        InferenceQuerySet,
-    )
 
     # Reject ambiguous output paths before config/runner construction can resolve
     # assets or create directories, including when snapshots are disabled.
-    query_set = InferenceQuerySet.from_json(query_json)
+    runtime_parent = os.environ.get("SLURM_TMPDIR")
+    if runtime_parent and not (
+        Path(runtime_parent).is_dir() and os.access(runtime_parent, os.W_OK)
+    ):
+        runtime_parent = None
+    workspace = tempfile.TemporaryDirectory(
+        prefix="openfold3-input-", dir=runtime_parent
+    )
+    # Click closes resources on success, early skip and exceptions alike.
+    click.get_current_context().call_on_close(workspace.cleanup)
+    runtime_directory = Path(workspace.name)
+    query_set = load_af3_query_set(query_json, runtime_directory / "input")
     validate_prepared_query_names(query_set)
+    if write_input_json is None:
+        write_input_json = run_data_pipeline
 
     logging.basicConfig(level=logging.INFO)
 
@@ -343,16 +356,38 @@ def predict(
     if skip is not None:
         experiment_settings["skip_existing"] = skip
 
+    # Inject owned defaults BEFORE validation derives download/cache directories.
+    # Explicit structure/precache stores are user inputs and remain untouched;
+    # per-query computed caches/logs always belong to this invocation.
+    template_args = runner_args.setdefault("template_preprocessor_settings", {})
+    template_root = runtime_directory / "template_data"
+    template_args["output_directory"] = template_root
+    template_args["cache_directory"] = template_root / "template_cache"
+    template_args["log_directory"] = template_root / "template_logs"
+    for key, child in (
+        ("structure_directory", "template_structures"),
+        ("precache_directory", "template_precache"),
+        ("structure_array_directory", "template_structure_arrays"),
+    ):
+        enabled = (
+            key == "structure_directory"
+            or (key == "precache_directory" and template_args.get("create_precache"))
+            or (
+                key == "structure_array_directory"
+                and template_args.get("preparse_structures")
+            )
+        )
+        if enabled and template_args.get(key) is None:
+            template_args[key] = template_root / child
+
     expt_config = InferenceExperimentConfig(
         inference_ckpt_path=inference_ckpt_path,
         inference_ckpt_name=inference_ckpt_name,
         user_default_runner_yaml_path=user_default_runner_path,
         **runner_args,
     )
-    if (
-        run_inference
-        and expt_config.output_writer_settings.structure_format != "cif"
-    ):
+    configure_af3_msa_sources(expt_config.dataset_config_kwargs.msa)
+    if run_inference and expt_config.output_writer_settings.structure_format != "cif":
         raise click.UsageError(
             "EnsembleFold wrapper structure_format must be cif; "
             "update output_writer_settings.structure_format in runner YAML."
@@ -399,39 +434,30 @@ def predict(
             )
             data_module.prepare_data()
             query_set = data_module.inference_config.query_set
-            if not expt_runner.use_templates:
-                clear_template_inputs(query_set)
             materialise_msas(
                 query_set,
-                expt_runner.output_dir,
+                runtime_directory / "prepared",
                 expt_config.dataset_config_kwargs.msa,
                 compress=compress_fold_input,
             )
-            if expt_runner.use_templates:
-                materialise_templates(
-                    query_set,
-                    expt_runner.output_dir,
-                    expt_config.template_preprocessor_settings,
-                    compress=compress_fold_input,
-                )
-            prepared_paths = {}
-            if write_input_json:
-                prepared_paths = write_prepared_query_sets(
-                    query_set, expt_runner.output_dir
-                )
+            materialise_templates(
+                query_set,
+                runtime_directory / "prepared",
+                expt_config.template_preprocessor_settings,
+                compress=compress_fold_input,
+            )
 
-            if run_inference and prepared_paths:
-                prepared_queries = {}
-                for path in prepared_paths.values():
-                    prepared = InferenceQuerySet.from_json(path)
-                    prepared_queries.update(prepared.queries)
-                query_set = InferenceQuerySet(
-                    seeds=list(query_set.seeds), queries=prepared_queries
-                )
+        # Saving conditions is independent of searching. This also handles D=false,
+        # J=true; no public resources are created at all when J=false.
+        if write_input_json:
+            write_af3_query_sets(
+                query_set, expt_runner.output_dir, compress=compress_fold_input
+            )
 
         if run_inference:
-            # Inference-only never performs network/database preprocessing.  It
-            # reconstructs native caches from the immutable prepared bundle.
+            # Conditions were freshly read into private files above. Keep the
+            # public declaration intact when disabling their use for this run.
+            query_set = query_set.model_copy(deep=True)
             inference_uses_templates = expt_runner.use_templates
             if inference_uses_templates:
                 if not run_data_pipeline:
@@ -445,20 +471,14 @@ def predict(
                 logger.info("All requested query/seed outputs are complete; skipping")
                 expt_runner.cleanup()
                 return
-            runtime_parent = os.environ.get("SLURM_TMPDIR")
-            if runtime_parent and not Path(runtime_parent).is_dir():
-                runtime_parent = None
-            with tempfile.TemporaryDirectory(
-                prefix="openfold3-inference-", dir=runtime_parent
-            ) as runtime_name:
-                if inference_uses_templates:
-                    restore_prepared_templates(
-                        query_set,
-                        Path(runtime_name),
-                        expt_config.template_preprocessor_settings,
-                    )
-                expt_runner.setup()
-                expt_runner.run(query_set)
+            if inference_uses_templates:
+                restore_prepared_templates(
+                    query_set,
+                    runtime_directory / "inference",
+                    expt_config.template_preprocessor_settings,
+                )
+            expt_runner.setup()
+            expt_runner.run(query_set)
     except BaseException:
         expt_runner.cleanup_msa_workspace()
         raise

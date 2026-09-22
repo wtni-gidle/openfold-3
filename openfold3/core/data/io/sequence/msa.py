@@ -15,6 +15,7 @@
 """This module contains IO functions for reading and writing MSA files."""
 
 import os
+import re
 import string
 import warnings
 from collections import OrderedDict
@@ -227,6 +228,14 @@ def parse_stockholm(
 
 MSA_PARSER_REGISTRY = {".a3m": parse_a3m, ".sto": parse_stockholm}
 
+def reject_legacy_paired_context(text: str) -> None:
+    """Never silently reinterpret a bundle using the retired synthetic row."""
+    if re.search(r"(?m)^[ \t]*>query openfold3_context_only[ \t\r]*$", text):
+        raise ValueError(
+            "Legacy paired context query marker is no longer supported; "
+            "regenerate this prepared bundle from the original inputs."
+        )
+
 
 def split_alignment_filename(path: Path) -> tuple[str, str]:
     """Return the semantic MSA key and alignment extension.
@@ -249,14 +258,14 @@ def split_alignment_filename(path: Path) -> tuple[str, str]:
     return basename, extension
 
 
-def is_canonical_unpaired_alignment(path: Path) -> bool:
-    """Return whether a path is an EnsembleFold finalized unpaired alignment."""
+def is_canonical_alignment(path: Path) -> bool:
+    """Return whether a path is an EnsembleFold finalized alignment pool."""
     name = path.name
     for compression_suffix in (".zst", ".gz", ".xz"):
         if name.endswith(compression_suffix):
             name = name[: -len(compression_suffix)]
             break
-    return Path(name).stem.endswith("_unpairedmsa")
+    return Path(name).stem.endswith(("_unpairedmsa", "_pairedmsa"))
 
 
 def parse_msas_direct(
@@ -313,18 +322,20 @@ def parse_msas_direct(
                 continue
 
             # Parse the MSAs with the appropriate parser
-            # The prepared unpaired file is already the concatenated, deduplicated
-            # source pool.  Do not apply the per-source ColabFold cap a second time;
-            # create_main() still applies the native total-row budget after computing
-            # the profile and deletion mean from the full pool.
+            # Public files are finalized pools, not individual search sources:
+            # unpaired is merged/deduplicated, paired is merged or locally paired.
+            # Reapplying a ColabFold source quota here can discard valid rows.
+            # Native create_main()/create_paired_from_precomputed() still enforce
+            # their inference row budgets; raw source files retain their quotas.
             limit = (
                 None
-                if max_seq_counts is None or is_canonical_unpaired_alignment(aln_file)
+                if max_seq_counts is None or is_canonical_alignment(aln_file)
                 else max_seq_counts.get(basename)
             )
-            msas[basename] = MSA_PARSER_REGISTRY[ext](
-                read_text_auto(aln_file.absolute()), limit
-            )
+            text = read_text_auto(aln_file.absolute())
+            if ext == ".a3m" and basename == "colabfold_paired":
+                reject_legacy_paired_context(text)
+            msas[basename] = MSA_PARSER_REGISTRY[ext](text, limit)
 
     return msas
 

@@ -1,4 +1,10 @@
 # OpenFold3-preview
+
+**EnsembleFold fork:** the public `predict`/shell wrapper uses AF3-style JSON.
+See [input, preparation and inference contract](docs/ENSEMBLEFOLD_INPUT.md) and
+[minimal input](examples/ensemblefold_input.json). Native `queries/chains`
+examples below belong to the underlying OpenFold3 tools, not this wrapper entry.
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/predictions_combined_dark.png">
   <source media="(prefers-color-scheme: light)" srcset="assets/predictions_combined_light.png">

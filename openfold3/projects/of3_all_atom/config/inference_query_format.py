@@ -77,11 +77,13 @@ class PocketConstraint(BaseModel):
 
 
 class PreparedTemplate(BaseModel):
-    """Portable, finalized template embedded directly in a chain definition.
+    """Internal finalized template with native ONE-BASED residue indices.
 
     Newly generated bundles contain a single-chain mmCIF and therefore omit
     ``chain_id``.  The optional field is accepted only so bundles written by the
-    earlier sidecar format can still be read.
+    earlier native sidecar format can still be read by internal/native utilities.
+    Public EnsembleFold JSON uses the separate AF3 boundary (zero-based indices)
+    and does not accept this native representation or sidecars.
     """
 
     model_config = {"extra": "forbid"}

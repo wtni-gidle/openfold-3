@@ -9,6 +9,7 @@ of whether the row count was recorded, so the shared rows are deleted there
 too.
 """
 
+import hashlib
 import textwrap
 from pathlib import Path
 
@@ -212,10 +213,16 @@ def test_missing_paired_msa_warns_when_protein_rep_lacks_one(tmp_path):
     input = MsaSampleProcessorInputInference.create_from_inference_query_entry(
         inference_query=query
     )
+    # Wrapper representatives are sequence identities, not directory/chain names.
+    missing_rep = hashlib.sha256(b"GHIKL").hexdigest()
     with pytest.warns(
-        UserWarning, match="Representative B is a protein chain with no precomputed"
+        UserWarning,
+        match=f"Representative {missing_rep} is a protein chain with no precomputed",
     ):
-        processor(input=input)
+        collection = processor(input=input)
+    paired_b = collection.chain_id_to_paired_msa["B"]
+    assert ["".join(row) for row in paired_b.msa] == ["-----", "-----"]
+    assert not paired_b.deletion_matrix.any()
 
 
 def test_missing_paired_msa_does_not_warn_for_rna_rep(tmp_path, recwarn):

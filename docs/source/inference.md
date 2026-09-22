@@ -1,5 +1,9 @@
 # OpenFold3 Inference
 
+> EnsembleFold wrapper users: `predict` now accepts AF3-style input. Follow the
+> [wrapper contract](../ENSEMBLEFOLD_INPUT.md). Native JSON examples retained below
+> document the underlying APIs and standalone native tools, not the public wrapper.
+
 Welcome to the Documentation for running inference with OpenFold3, our fully open source, trainable, PyTorch-based reproduction of DeepMind’s AlphaFold3. OpenFold3 implements the features described in [AlphaFold3 *Nature* paper](https://www.nature.com/articles/s41586-024-07487-w).
 
 This guide covers how to use OpenFold3 to make structure predictions.

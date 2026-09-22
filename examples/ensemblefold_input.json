@@ -1,0 +1,9 @@
+{
+  "name": "example",
+  "modelSeeds": [42],
+  "sequences": [
+    {"protein": {"id": "A", "sequence": "ACDE", "unpairedMsa": "", "pairedMsa": "", "templates": []}}
+  ],
+  "dialect": "alphafold3",
+  "version": 4
+}

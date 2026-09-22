@@ -5,7 +5,7 @@ usage() {
     echo "Usage: $0 -i <query.json> -o <output_dir> [options]"
     echo ""
     echo "Required:"
-    echo "  -i  Input OpenFold3 query JSON."
+    echo "  -i  Input AF3-style EnsembleFold JSON (name/modelSeeds/sequences)."
     echo "  -o  Output/job root directory."
     echo ""
     echo "Options:"

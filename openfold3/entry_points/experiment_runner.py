@@ -747,6 +747,7 @@ class InferenceExperimentRunner(ExperimentRunner):
         """Set the explicit seed list used by the prediction dataset."""
         self.seeds = list(seeds)
         self.experiment_config.experiment_settings.seeds = list(seeds)
+        self.__dict__.pop("data_module_config", None)
         self.__dict__.pop("lightning_data_module", None)
 
     @staticmethod
@@ -908,6 +909,7 @@ class InferenceExperimentRunner(ExperimentRunner):
         for seeds, grouped_query_set in groups:
             self.seeds = seeds
             self.inference_query_set = grouped_query_set
+            self.__dict__.pop("data_module_config", None)
             self.__dict__.pop("lightning_data_module", None)
             logger.info(
                 "Beginning inference prediction for %d queries and seeds %s",

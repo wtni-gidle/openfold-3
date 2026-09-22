@@ -30,14 +30,19 @@ from pydantic import BaseModel
 from openfold3.core.config.msa_pipeline_configs import (
     MsaSampleProcessorInputInference,
 )
+from openfold3.core.data.af3_input import load_af3_query_set as load_af3_query_set
+from openfold3.core.data.af3_input import write_af3_query_sets as write_af3_query_sets
 from openfold3.core.data.io.compression import read_text_auto, write_zstd_text
-from openfold3.core.data.io.sequence.msa import MsaSampleParserInference
+from openfold3.core.data.io.sequence.msa import (
+    MsaSampleParserInference,
+)
 from openfold3.core.data.pipelines.sample_processing.msa import (
     create_paired,
     create_paired_from_precomputed,
 )
 from openfold3.core.data.primitives.sequence.hash import get_sequence_hash
 from openfold3.core.data.primitives.sequence.msa import MsaArray, MsaArrayCollection
+from openfold3.core.data.resources.residues import MoleculeType
 from openfold3.projects.of3_all_atom.config.dataset_config_components import (
     MSASettings,
 )
@@ -153,7 +158,7 @@ def write_prepared_query_sets(
     return outputs
 
 
-def msa_array_to_a3m(msa: MsaArray) -> str:
+def msa_array_to_a3m(msa: MsaArray, *, query_first: bool = True) -> str:
     """Serialize the MSA information consumed by OpenFold back to A3M.
 
     OpenFold features use insertion counts, not the identities of insertion
@@ -164,7 +169,7 @@ def msa_array_to_a3m(msa: MsaArray) -> str:
     for row_index, (sequence, deletion_row) in enumerate(
         zip(msa.msa, msa.deletion_matrix, strict=True)
     ):
-        header = "query" if row_index == 0 else f"row_{row_index}"
+        header = "query" if query_first and row_index == 0 else f"row_{row_index}"
         encoded = "".join(
             f"{'x' * int(n_insertions)}{residue}"
             for residue, n_insertions in zip(sequence, deletion_row, strict=True)
@@ -218,6 +223,21 @@ def _create_final_paired_msa(
     )
 
 
+def configure_af3_msa_sources(config: MSASettings) -> None:
+    """Make explicit public channels readable even with a native source whitelist.
+
+    Preserve all native source quotas/order and downstream row budgets. Canonical
+    main input is the finalized profile pool, not another raw search database.
+    """
+    defaults = MSASettings()
+    for key in ("colabfold_main", "colabfold_paired"):
+        config.max_seq_counts.setdefault(key, defaults.max_seq_counts[key])
+    if "colabfold_main" not in config.aln_order:
+        config.aln_order.append("colabfold_main")
+    if "colabfold_paired" not in config.paired_msa_order:
+        config.paired_msa_order.append("colabfold_paired")
+
+
 def materialise_msas(
     query_set: InferenceQuerySet,
     output_root: Path,
@@ -228,9 +248,8 @@ def materialise_msas(
     """Replace native MSA sources with canonical paired/unpaired bundle files."""
     for query_name, query in query_set.queries.items():
         if not query.use_msas:
-            for chain in query.chains:
-                chain.main_msa_file_paths = []
-                chain.paired_msa_file_paths = []
+            # A use flag disables features, not the user's declared conditions.
+            # Public AF3 resources have already been staged privately by the reader.
             continue
         processor_input = (
             MsaSampleProcessorInputInference.create_from_inference_query_entry(query)
@@ -241,7 +260,6 @@ def materialise_msas(
             if query.use_paired_msas
             else {}
         )
-
         job_directory = Path(output_root) / sanitise_job_name(query_name)
         msa_directory = job_directory / "msas"
         main_by_rep = {
@@ -251,6 +269,10 @@ def materialise_msas(
 
         for chain in query.chains:
             if chain.molecule_type not in config.moltypes:
+                continue
+            if chain.main_msa_file_paths == [] and not chain.paired_msa_file_paths:
+                # Explicitly absent conditions have no native MSA representative.
+                # Do not turn them into query-only features just by publishing.
                 continue
             rep_id = get_sequence_hash(chain.sequence)
             if rep_id not in main_by_rep:
@@ -272,6 +294,14 @@ def materialise_msas(
                 atomic_write_text(main_path, main_text)
             chain.main_msa_file_paths = [main_path]
 
+            if chain.molecule_type != MoleculeType.PROTEIN:
+                # RNA gap rows only align internal matrix depth; the native
+                # consumer reconstructs them from the protein paired channels.
+                chain.paired_msa_file_paths = []
+                continue
+            if not query.use_paired_msas:
+                # Do not erase a declared paired condition when only its use is off.
+                continue
             representative_chain = collection.rep_id_to_chain_id.get(rep_id)
             paired = paired_by_chain.get(representative_chain)
             if paired is None or len(paired) == 0:
@@ -280,7 +310,9 @@ def materialise_msas(
             paired_path = msa_directory / (
                 f"{sanitise_job_name(query_name)}__{entity_id}_pairedmsa{main_suffix}"
             )
-            paired_text = msa_array_to_a3m(paired)
+            # Preserve native paired rows, including an ordinary query row if
+            # present. A local first hit is not necessarily the query.
+            paired_text = msa_array_to_a3m(paired, query_first=False)
             if compress:
                 write_zstd_text(paired_path, paired_text)
             else:
@@ -299,7 +331,7 @@ def _normalise_release_date(value: Any) -> date | None:
 
 
 def extract_single_chain_mmcif(source_path: Path, chain_id: str) -> str:
-    """Return an mmCIF containing coordinates for one label-asym chain only."""
+    """Keep one chain and its entity metadata, without renumbering SEQRES."""
     cif_file = pdbx.CIFFile.read(StringIO(read_text_auto(source_path)))
     cif_file = copy.deepcopy(cif_file)
     atom_site = cif_file.block["atom_site"]
@@ -314,6 +346,39 @@ def extract_single_chain_mmcif(source_path: Path, chain_id: str) -> str:
     cif_file.block["atom_site"] = pdbx.CIFCategory(
         {name: column.as_array()[chain_mask] for name, column in atom_site.items()}
     )
+    block = cif_file.block
+
+    def subset(category_name, column_name, values):
+        if category_name not in block or column_name not in block[category_name]:
+            return
+        category = block[category_name]
+        mask = np.isin(category[column_name].as_array(), list(values))
+        if np.any(mask):
+            block[category_name] = pdbx.CIFCategory(
+                {name: column.as_array()[mask] for name, column in category.items()}
+            )
+        else:
+            del block[category_name]
+
+    if "struct_asym" in block:
+        asym = block["struct_asym"]
+        entities = set(asym["entity_id"].as_array()[asym["id"].as_array() == chain_id])
+        subset("struct_asym", "id", {chain_id})
+        subset("entity", "id", entities)
+        for category in ("entity_poly", "entity_poly_seq", "pdbx_entity_nonpoly"):
+            subset(category, "entity_id", entities)
+    for category in (
+        "pdbx_poly_seq_scheme",
+        "pdbx_nonpoly_scheme",
+        "pdbx_branch_scheme",
+    ):
+        subset(category, "asym_id", {chain_id})
+    if "entity_poly" in block and "pdbx_strand_id" in block["entity_poly"]:
+        # This column uses author chain IDs, not label_asym_id.
+        author_ids = sorted(set(atom_site["auth_asym_id"].as_array()[chain_mask]))
+        block["entity_poly"]["pdbx_strand_id"] = pdbx.CIFColumn(
+            [",".join(author_ids)] * block["entity_poly"].row_count
+        )
     output = StringIO()
     cif_file.write(output)
     return output.getvalue()
@@ -331,6 +396,31 @@ def materialise_templates(
         job_directory = Path(output_root) / sanitise_job_name(query_name)
         template_directory = job_directory / "msas"
         for chain in query.chains:
+            # Explicit prepared templates do not need native search/realignment.
+            # In particular, repeated data must not mistake them for no hits.
+            if chain.templates is not None:
+                for index, template in enumerate(chain.templates):
+                    text = read_text_auto(template.mmcif_path)
+                    block = pdbx.CIFFile.read(StringIO(text)).block
+                    chains = np.unique(block["atom_site"]["label_asym_id"].as_array())
+                    if len(chains) != 1:
+                        raise ValueError(
+                            "Explicit prepared templates must be single-chain"
+                        )
+                    text = extract_single_chain_mmcif(
+                        template.mmcif_path, str(chains[0])
+                    )
+                    suffix = ".cif.zst" if compress else ".cif"
+                    path = template_directory / (
+                        f"{sanitise_job_name(query_name)}__"
+                        f"{sanitise_job_name(chain.chain_ids[0])}_template_{index}{suffix}"
+                    )
+                    if compress:
+                        write_zstd_text(path, text)
+                    else:
+                        atomic_write_text(path, text)
+                    template.mmcif_path = path
+                continue
             cache_path = chain.template_alignment_file_path
             template_ids = chain.template_entry_chain_ids or []
             if cache_path is None or not template_ids:
@@ -420,6 +510,41 @@ def clear_template_inputs(query_set: InferenceQuerySet) -> None:
             chain.prepared_template_file_path = None
 
 
+def _native_safe_template_chain(cif_text: str, chain_id: str) -> tuple[str, str]:
+    """Normalize only private label-asym identities unsafe in native id splitting.
+
+    Author identifiers, residue numbers, coordinates and the public CIF stay
+    unchanged. Update label-asym references together for native unresolved-residue
+    reconstruction, not only the coordinate table.
+    """
+    if "_" not in chain_id:
+        return cif_text, chain_id
+    cif = pdbx.CIFFile.read(StringIO(cif_text))
+    for category_name, category in cif.block.items():
+        for column_name, column in list(category.items()):
+            if (
+                (category_name == "struct_asym" and column_name == "id")
+                or column_name in {"asym_id", "label_asym_id"}
+                or column_name.endswith("_label_asym_id")
+            ):
+                values = column.as_array().astype(object)
+                values[values == chain_id] = "A"
+                category[column_name] = pdbx.CIFColumn(values.tolist())
+            elif column_name == "asym_id_list":
+                category[column_name] = pdbx.CIFColumn(
+                    [
+                        ",".join(
+                            "A" if part == chain_id else part
+                            for part in value.split(",")
+                        )
+                        for value in column.as_array()
+                    ]
+                )
+    stream = StringIO()
+    cif.write(stream)
+    return stream.getvalue(), "A"
+
+
 def restore_prepared_templates(
     query_set: InferenceQuerySet,
     runtime_directory: Path,
@@ -443,17 +568,12 @@ def restore_prepared_templates(
                 continue
             cache = {}
             template_ids = []
+            identities = {}
             for template_index, template in enumerate(templates):
                 cif_text = read_text_auto(template.mmcif_path)
-                structure_path = structure_directory / (
-                    f"{sanitise_job_name(query_name)}_{chain_index}_{template_index}_"
-                    f"{sanitise_job_name(template.entry_id)}.cif"
-                )
-                atomic_write_text(structure_path, cif_text)
-
                 template_chain_id = template.chain_id
                 if template_chain_id is None:
-                    cif_file = pdbx.CIFFile.read(structure_path)
+                    cif_file = pdbx.CIFFile.read(StringIO(cif_text))
                     chain_ids = np.unique(
                         cif_file.block["atom_site"]["label_asym_id"].as_array()
                     ).tolist()
@@ -463,7 +583,35 @@ def restore_prepared_templates(
                             f"exactly one label_asym_id; found {chain_ids}"
                         )
                     template_chain_id = str(chain_ids[0])
-                template_id = f"{template.entry_id}_{template_chain_id}"
+                signature = (
+                    template.entry_id,
+                    template_chain_id,
+                    cif_text,
+                    tuple(template.query_indices),
+                    tuple(template.template_indices),
+                    template.source_index,
+                    template.release_date,
+                )
+                if signature in identities:
+                    # Native repeated identical hits share one cache entry and
+                    # collapse in sample_templates' dict, while retaining list order.
+                    template_ids.append(identities[signature])
+                    continue
+                cif_text, template_chain_id = _native_safe_template_chain(
+                    cif_text, template_chain_id
+                )
+                native_entry = template.entry_id
+                if "_" in native_entry:
+                    native_entry = f"ef{template_index}"
+                template_id = f"{native_entry}_{template_chain_id}"
+                while template_id in cache:
+                    native_entry = "ef" + native_entry
+                    template_id = f"{native_entry}_{template_chain_id}"
+                identities[signature] = template_id
+                structure_path = structure_directory / (
+                    f"{sanitise_job_name(query_name)}_{chain_index}_{template_index}.cif"
+                )
+                atomic_write_text(structure_path, cif_text)
 
                 cache[template_id] = {
                     "index": template.source_index,

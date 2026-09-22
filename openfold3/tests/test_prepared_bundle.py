@@ -47,9 +47,9 @@ def test_predict_rejects_colliding_names_before_preparation(
     from openfold3.entry_points import validator
 
     source = tmp_path / "queries.json"
-    chain = {"molecule_type": "protein", "chain_ids": ["A"], "sequence": "ACDE"}
+    chain = {"protein": {"id": "A", "sequence": "ACDE"}}
     source.write_text(
-        json.dumps({"queries": {name: {"chains": [chain]} for name in ("a b", "a_b")}})
+        json.dumps([{"name": name, "sequences": [chain]} for name in ("a b", "a_b")])
     )
     original = source.read_bytes()
     output = tmp_path / "out"
@@ -62,9 +62,19 @@ def test_predict_rejects_colliding_names_before_preparation(
     result = CliRunner().invoke(
         run_openfold.cli,
         [
-            "predict", "--query-json", str(source), "--output-dir", str(output),
-            "--run-data-pipeline", str(stages[0]), "--run-inference", str(stages[1]),
-            "--write-input-json", str(write_input_json), "--use_tf32", "false",
+            "predict",
+            "--query-json",
+            str(source),
+            "--output-dir",
+            str(output),
+            "--run-data-pipeline",
+            str(stages[0]),
+            "--run-inference",
+            str(stages[1]),
+            "--write-input-json",
+            str(write_input_json),
+            "--use_tf32",
+            "false",
         ],
     )
 
@@ -274,6 +284,66 @@ def test_materialised_templates_reuse_mmcif_for_duplicate_occurrences(tmp_path):
     assert "chain_id" not in serialized[0]
     relocated = InferenceQuerySet.from_json(output_path)
     assert relocated.queries["target"].chains[0].templates[0].mmcif_path.is_file()
+
+
+def test_repeated_template_materialisation_keeps_explicit_mapping(tmp_path):
+    cif = Path(__file__).parent / "test_data/mmcifs/1a8q.cif"
+    single = tmp_path / "single.cif"
+    from openfold3.core.data.prepared_bundle import extract_single_chain_mmcif
+
+    single.write_text(extract_single_chain_mmcif(cif, "A"))
+    query_set = InferenceQuerySet.model_validate(
+        {
+            "queries": {
+                "job": {
+                    "chains": [
+                        {
+                            "molecule_type": "protein",
+                            "chain_ids": ["A"],
+                            "sequence": "ACDE",
+                            "templates": [
+                                {
+                                    "entry_id": "1a8q",
+                                    "mmcif_path": single,
+                                    "query_indices": [1, 3],
+                                    "template_indices": [2, 4],
+                                    "source_index": 4,
+                                    "release_date": "2020-01-01",
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        }
+    )
+    materialise_templates(query_set, tmp_path / "one", SimpleNamespace(), compress=True)
+    materialise_templates(query_set, tmp_path / "two", SimpleNamespace(), compress=True)
+    templates = query_set.queries["job"].chains[0].templates
+    assert len(templates) == 1
+    assert templates[0].query_indices == [1, 3]
+    assert templates[0].template_indices == [2, 4]
+    assert templates[0].source_index == 4
+    assert "two/job/msas" in str(templates[0].mmcif_path)
+
+
+def test_single_chain_cif_filters_chain_metadata_not_polymer_positions(tmp_path):
+    from io import StringIO
+
+    from biotite.structure.io import pdbx
+
+    from openfold3.core.data.prepared_bundle import extract_single_chain_mmcif
+
+    cif = Path(__file__).parent / "test_data/mmcifs/1a8q.cif"
+    original = pdbx.CIFFile.read(cif).block
+    extracted = pdbx.CIFFile.read(StringIO(extract_single_chain_mmcif(cif, "A"))).block
+    assert extracted["struct_asym"]["id"].as_array().tolist() == ["A"]
+    entity = extracted["struct_asym"]["entity_id"].as_array()[0]
+    original_rows = original["entity_poly_seq"]["entity_id"].as_array() == entity
+    np.testing.assert_array_equal(
+        extracted["entity_poly_seq"]["num"].as_array(),
+        original["entity_poly_seq"]["num"].as_array()[original_rows],
+    )
 
 
 def test_restore_prepared_templates_rebuilds_native_runtime_cache(tmp_path):
