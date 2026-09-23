@@ -40,7 +40,6 @@ from openfold3.core.data.pipelines.sample_processing.msa import (
     create_paired,
     create_paired_from_precomputed,
 )
-from openfold3.core.data.primitives.sequence.hash import get_sequence_hash
 from openfold3.core.data.primitives.sequence.msa import MsaArray, MsaArrayCollection
 from openfold3.core.data.resources.residues import MoleculeType
 from openfold3.projects.of3_all_atom.config.dataset_config_components import (
@@ -243,7 +242,7 @@ def materialise_msas(
     output_root: Path,
     config: MSASettings,
     *,
-    compress: bool = True,
+    compress: bool = False,
 ) -> None:
     """Replace native MSA sources with canonical paired/unpaired bundle files."""
     for query_name, query in query_set.queries.items():
@@ -266,6 +265,7 @@ def materialise_msas(
             rep_id: _deduplicated_main_msa(collection, rep_id, config)
             for rep_id in collection.rep_id_to_main_msa
         }
+        materialized_by_rep = {}
 
         for chain in query.chains:
             if chain.molecule_type not in config.moltypes:
@@ -274,10 +274,21 @@ def materialise_msas(
                 # Explicitly absent conditions have no native MSA representative.
                 # Do not turn them into query-only features just by publishing.
                 continue
-            rep_id = get_sequence_hash(chain.sequence)
-            if rep_id not in main_by_rep:
+            rep_id = collection.chain_id_to_rep_id.get(chain.chain_ids[0])
+            if rep_id in materialized_by_rep:
+                # Distinct entities may explicitly share both source channels.
+                # Preserve that identity when replacing sources with bundle paths.
+                representative = materialized_by_rep[rep_id]
+                chain.main_msa_file_paths = representative.main_msa_file_paths
+                if query.use_paired_msas or chain.molecule_type != MoleculeType.PROTEIN:
+                    chain.paired_msa_file_paths = representative.paired_msa_file_paths
+                continue
+            if rep_id is not None:
+                materialized_by_rep[rep_id] = chain
+            main_msa = main_by_rep.get(rep_id)
+            if main_msa is None:
                 query_row = np.asarray([list(chain.sequence)], dtype="<U1")
-                main_by_rep[rep_id] = MsaArray(
+                main_msa = MsaArray(
                     msa=query_row,
                     deletion_matrix=np.zeros(query_row.shape, dtype=int),
                     metadata=pd.DataFrame(),
@@ -287,7 +298,7 @@ def materialise_msas(
             main_path = msa_directory / (
                 f"{sanitise_job_name(query_name)}__{entity_id}_unpairedmsa{main_suffix}"
             )
-            main_text = msa_array_to_a3m(main_by_rep[rep_id])
+            main_text = msa_array_to_a3m(main_msa)
             if compress:
                 write_zstd_text(main_path, main_text)
             else:
@@ -389,7 +400,7 @@ def materialise_templates(
     output_root: Path,
     config: TemplatePreprocessorSettings,
     *,
-    compress: bool = True,
+    compress: bool = False,
 ) -> None:
     """Embed finalized templates and export one single-chain mmCIF per template."""
     for query_name, query in query_set.queries.items():

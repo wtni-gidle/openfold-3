@@ -15,7 +15,7 @@
 from typing import Annotated
 
 from biotite.structure import AtomArray
-from pydantic import BaseModel, BeforeValidator, DirectoryPath, FilePath
+from pydantic import BaseModel, BeforeValidator, DirectoryPath, FilePath, model_validator
 
 from openfold3.core.config.config_utils import (
     _convert_molecule_type,
@@ -38,13 +38,21 @@ class MsaChainDataInference(BaseModel):
     """Inference input for a single chain in the MSA sample processor pipeline."""
 
     molecule_type: MoleculeType
-    sequence: str
+    sequence: str | None = None
     paired_msa_file_paths: (
         Annotated[list[FilePath | DirectoryPath], BeforeValidator(_ensure_list)] | None
     ) = None
     main_msa_file_paths: (
         Annotated[list[FilePath | DirectoryPath], BeforeValidator(_ensure_list)] | None
     ) = None
+
+    @model_validator(mode="after")
+    def validate_polymer_sequence(self):
+        if self.molecule_type in {
+            MoleculeType.PROTEIN, MoleculeType.RNA, MoleculeType.DNA
+        } and not self.sequence:
+            raise ValueError("Polymer MSA input requires a nonempty sequence")
+        return self
 
 
 class MsaSampleProcessorInputTrain(BaseModel):

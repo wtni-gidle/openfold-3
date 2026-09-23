@@ -632,6 +632,7 @@ class MsaSampleParserInference(MsaSampleParser):
         """
         # Create maps
         maps = MsaSampleParserMapper()
+        representatives = {}
         for chain_id, chain_data in input.msa_chain_data.items():
             if chain_data.molecule_type in self.config.moltypes:
                 main_msa_file_paths = (
@@ -657,10 +658,22 @@ class MsaSampleParserInference(MsaSampleParser):
                     )
                     continue
 
-                # Inference entities are defined by sequence, not by incidental file
-                # layout.  This also lets flat, human-readable prepared bundles share
-                # MSAs across repeated copies without path-derived ID collisions.
-                rep_id = get_sequence_hash(chain_data.sequence)
+                # Share only identical molecular/MSA inputs. Distinct explicit
+                # sources remain independent even for identical sequences.
+                identity = (
+                    chain_data.molecule_type,
+                    chain_data.sequence,
+                    tuple(main_msa_file_paths),
+                    tuple(paired_msa_file_paths),
+                )
+                if identity not in representatives:
+                    # Retain sequence-hash ordering across bundle relocation;
+                    # hashing temporary paths would change native sampling order.
+                    representatives[identity] = (
+                        f"{get_sequence_hash(chain_data.sequence)}_"
+                        f"{chain_data.molecule_type.name}_{chain_id}"
+                    )
+                rep_id = representatives[identity]
 
                 maps.chain_id_to_rep_id[chain_id] = rep_id
                 maps.chain_id_to_mol_type[chain_id] = chain_data.molecule_type

@@ -1058,8 +1058,7 @@ class TestRemoveQuerySetDuplicates:
             "inference_ckpt_path": dummy_ckpt_file,
             "cache_path": tmp_path / "cache",
         }
-        if full_confidence_format == "json":
-            config["output_writer_settings"] = {"full_confidence_output_format": "json"}
+        config["output_writer_settings"] = {"full_confidence_output_format": full_confidence_format}
         experiment_config = InferenceExperimentConfig.model_validate(config)
         expt_runner = InferenceExperimentRunner(
             experiment_config, num_diffusion_samples=2, output_dir=dummy_output_path
@@ -1110,7 +1109,7 @@ class TestUserDefaultRunnerYaml:
 
         assert cfg.user_default_runner_yaml_path is None
         assert cfg.output_writer_settings.structure_format == "cif"
-        assert cfg.output_writer_settings.full_confidence_output_format == "npz"
+        assert cfg.output_writer_settings.full_confidence_output_format == "json"
 
     def test_default_runner_yaml_applied(self, tmp_path, dummy_ckpt_file):
         """Scenario 2: runner.yml in cache → settings applied, path recorded."""

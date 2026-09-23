@@ -206,15 +206,20 @@ def train(
     type=bool,
     default=None,
     show_default=True,
-    help="Write an AF3-style <query>_data.json. Default follows run-data-pipeline.",
+    help="Write an AF3-style <query>_data.json (default: true).",
 )
 @click.option(
     "--compress-fold-input",
     "--compress_fold_input",
     type=bool,
-    default=True,
+    default=False,
     show_default=True,
     help="Write prepared A3M and mmCIF resources with zstd compression.",
+)
+@click.option(
+    "--compress-full-confidence", "--compress_full_confidence",
+    type=bool, default=None,
+    help="Write detailed confidence as compressed NPZ (effective default: false; honors explicit legacy runner format).",
 )
 @click.option(
     "--skip",
@@ -249,7 +254,8 @@ def predict(
     run_data_pipeline: bool = True,
     run_inference: bool = True,
     write_input_json: bool | None = None,
-    compress_fold_input: bool = True,
+    compress_fold_input: bool = False,
+    compress_full_confidence: bool | None = None,
     skip: bool | None = None,
     max_template_date=None,
     use_tf32: bool = True,
@@ -327,7 +333,7 @@ def predict(
     query_set = load_af3_query_set(query_json, runtime_directory / "input")
     validate_prepared_query_names(query_set)
     if write_input_json is None:
-        write_input_json = run_data_pipeline
+        write_input_json = True
 
     logging.basicConfig(level=logging.INFO)
 
@@ -345,6 +351,8 @@ def predict(
     if runner_yaml:
         config_utils.deep_update(runner_args, config_utils.load_yaml(runner_yaml))
 
+    if compress_full_confidence is not None:
+        runner_args.setdefault("output_writer_settings", {})["compress_full_confidence"] = compress_full_confidence
     experiment_settings = runner_args.setdefault("experiment_settings", {})
     runner_configures_seeds = any(
         key in experiment_settings for key in ("seeds", "num_seeds")

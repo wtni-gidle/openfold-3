@@ -19,8 +19,9 @@ usage() {
     echo "  -M  Use ColabFold MSA server. (default: true)"
     echo "  -T  Use templates. (default: true)"
     echo "  -m  Inclusive maximum template date, YYYY-MM-DD."
-    echo "  -w  Write prepared JSON: auto/true/false. (default: auto)"
-    echo "  -z  Compress prepared MSA/template files. (default: true)"
+    echo "  -w  Write prepared JSON: true/false. (default: true)"
+    echo "  -z  Compress prepared MSA/template files. (default: false)"
+    echo "  -f  Compress detailed confidence as NPZ. (default: false; respects runner YAML)"
     echo "  -S  Skip complete query/seed outputs. (default: false)"
     echo "  -F  Enable TF32. (default: true)"
     echo "  -h  Show this help."
@@ -31,7 +32,7 @@ usage() {
     exit 1
 }
 
-while getopts "i:o:d:D:P:r:s:y:k:M:T:m:w:z:S:F:h" opt; do
+while getopts "i:o:d:D:P:r:s:y:k:M:T:m:w:z:f:S:F:h" opt; do
     case "${opt}" in
     i) input_path=$OPTARG ;;
     o) output_dir=$OPTARG ;;
@@ -47,6 +48,7 @@ while getopts "i:o:d:D:P:r:s:y:k:M:T:m:w:z:S:F:h" opt; do
     m) max_template_date=$OPTARG ;;
     w) write_input_json=$OPTARG ;;
     z) compress_fold_input=$OPTARG ;;
+    f) compress_full_confidence=$OPTARG ;;
     S) skip=$OPTARG ;;
     F) use_tf32=$OPTARG ;;
     h) usage ;;
@@ -65,21 +67,14 @@ if [[ "$run_data_pipeline" == "" ]]; then run_data_pipeline="true"; fi
 if [[ "$run_inference" == "" ]]; then run_inference="true"; fi
 if [[ "$use_msa_server" == "" ]]; then use_msa_server="true"; fi
 if [[ "$use_templates" == "" ]]; then use_templates="true"; fi
-if [[ "$write_input_json" == "" ]]; then write_input_json="auto"; fi
-if [[ "$compress_fold_input" == "" ]]; then compress_fold_input="true"; fi
+if [[ "$write_input_json" == "" ]]; then write_input_json="true"; fi
+if [[ "$compress_fold_input" == "" ]]; then compress_fold_input="false"; fi
 if [[ "$skip" == "" ]]; then skip="false"; fi
 if [[ "$use_tf32" == "" ]]; then use_tf32="true"; fi
 
 if [[ "$run_data_pipeline" == "false" && "$run_inference" == "false" ]]; then
     echo "Error: run_data_pipeline and run_inference cannot both be false."
     exit 1
-fi
-if [[ "$write_input_json" == "auto" ]]; then
-    if [[ "$run_data_pipeline" == "false" ]]; then
-        write_input_json="false"
-    else
-        write_input_json="true"
-    fi
 fi
 
 openfold_bin="${OPENFOLD_BIN:-run_openfold}"
@@ -116,6 +111,9 @@ command_args=(
     --use_tf32 "$use_tf32"
 )
 
+if [[ "${compress_full_confidence:-}" != "" ]]; then
+    command_args+=(--compress_full_confidence "$compress_full_confidence")
+fi
 if [[ "$model_seeds" != "" ]]; then command_args+=(--seeds "$model_seeds"); fi
 if [[ "$diffusion_samples" != "" ]]; then
     command_args+=(--num_diffusion_samples "$diffusion_samples")

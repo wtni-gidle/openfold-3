@@ -172,6 +172,7 @@ def load_af3_query_set(json_path: Path, resource_directory: Path) -> InferenceQu
             raise ValueError("sequences must be a nonempty list")
         chains, used_ids = [], set()
         paired_states, paired_depths = {}, {}
+        staged_msa_paths = {}
         for chain_index, entity in enumerate(sequences):
             _keys(entity, {"protein", "rna", "dna", "ligand"}, "sequence entity")
             if len(entity) != 1:
@@ -298,7 +299,22 @@ def load_af3_query_set(json_path: Path, resource_directory: Path) -> InferenceQu
                             if channel == "unpairedMsa"
                             else "input_pairedmsa.a3m"
                         )
-                        chain[native] = [_put(directory / filename, text)]
+                        source = body.get(channel + "Path")
+                        source_key = None
+                        if source is not None:
+                            source = Path(source).expanduser()
+                            if not source.is_absolute():
+                                source = json_path.parent / source
+                            source_key = (kind, sequence, channel, source.resolve())
+                        # Preserve explicit shared sources within this read;
+                        # equal inline content does not imply shared identity.
+                        if source_key is not None and source_key in staged_msa_paths:
+                            staged_path = staged_msa_paths[source_key]
+                        else:
+                            staged_path = _put(directory / filename, text)
+                            if source_key is not None:
+                                staged_msa_paths[source_key] = staged_path
+                        chain[native] = [staged_path]
                 if body.get("templates") is not None:
                     if not isinstance(body["templates"], list):
                         raise ValueError("templates must be a list")
@@ -355,7 +371,7 @@ def _atomic_bytes(path, content):
         Path(name).unlink(missing_ok=True)
 
 
-def write_af3_query_sets(query_set, output_root, *, compress=True):
+def write_af3_query_sets(query_set, output_root, *, compress=False):
     """Publish self-contained per-job snapshots; read all sources before writing.
 
     On a caught filesystem failure restore overwritten files. This is not a
@@ -369,6 +385,7 @@ def write_af3_query_sets(query_set, output_root, *, compress=True):
         query = query_set.queries[name]
         job_dir = Path(output_root) / safe
         sequences = []
+        published_msa_paths = {}
 
         def resource(path, stem, suffix, safe=safe, job_dir=job_dir):
             text = read_text_auto(path)
@@ -428,9 +445,14 @@ def write_af3_query_sets(query_set, output_root, *, compress=True):
                             "Finalize native MSA sources before AF3 publication"
                         )
                     else:
-                        body[public + "Path"] = resource(
-                            paths[0], f"{chain.chain_ids[0]}_{suffix}", ".a3m"
+                        source_key = (
+                            kind, chain.sequence, public, Path(paths[0]).resolve()
                         )
+                        if source_key not in published_msa_paths:
+                            published_msa_paths[source_key] = resource(
+                                paths[0], f"{chain.chain_ids[0]}_{suffix}", ".a3m"
+                            )
+                        body[public + "Path"] = published_msa_paths[source_key]
                 if kind == "protein" and chain.templates is not None:
                     body["templates"] = []
                     for i, template in enumerate(chain.templates):

@@ -136,7 +136,8 @@ dataset_config_kwargs:
 # Configure the output formats / content
 output_writer_settings: 
   structure_format: cif  [cif | pdb | cif.gz]
-  full_confidence_output_format: npz [npz (default) | json]
+  compress_full_confidence: false [false (default) | true]
+  # Legacy explicit full_confidence_output_format: json [json | npz]
   full_confidence_output_dtype: float16 [float32 | float16]
   write_features: false
   write_latent_outputs: false

@@ -242,7 +242,8 @@ Configures the format of output files.
 
 **All Options**:
 - `structure_format` *(Literal["pdb", "cif", "cif.gz"])*: Native writer output format (default: `cif`). The EnsembleFold `predict` wrapper requires `cif` when inference is enabled.
-- `full_confidence_output_format` *(Literal["json", "npz"])*: Confidence output format (default: `npz`; set to `json` for JSON output)
+- `full_confidence_output_format` *(Literal["json", "npz"])*: Legacy explicit confidence output format; omitted resolves to `json` unless `compress_full_confidence` is true
+- `compress_full_confidence` *(bool)*: Write compressed NPZ instead of JSON (effective default: `false`). An explicit legacy format is preserved when this option is omitted; explicitly conflicting options are rejected. Array grouping, dtype setting, and other output controls are unchanged.
 - `full_confidence_output_dtype` *(Literal["float32", "float16"])*: Data type for confidence scores when using npz format (default: `float16`)
 - `write_features` *(bool)*: Write intermediate features (default: `false`)
 - `write_latent_outputs` *(bool)*: Write model intermediate outputs (default: `false`)
@@ -252,7 +253,7 @@ Configures the format of output files.
 ```yaml
 output_writer_settings:
   structure_format: cif
-  full_confidence_output_format: npz
+  compress_full_confidence: false
 ```
 
 ---

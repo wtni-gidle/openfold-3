@@ -1,7 +1,7 @@
 output_writer_settings:
   # The EnsembleFold predict wrapper requires CIF for inference.
   structure_format: cif
-  # Save full confidence scores as compressed NPZ (default); use json for JSON output.
-  full_confidence_output_format: npz
+  # Detailed confidence defaults to JSON; true selects compressed NPZ.
+  compress_full_confidence: false
   # Save features (default: False) 
   write_features: True

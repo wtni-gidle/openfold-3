@@ -161,11 +161,21 @@ class OutputWritingSettings(BaseModel):
     """
 
     structure_format: Literal["pdb", "cif", "cif.gz"] = "cif"
-    full_confidence_output_format: Literal["json", "npz"] = "npz"
+    full_confidence_output_format: Literal["json", "npz"] | None = None
+    compress_full_confidence: bool | None = None
     full_confidence_output_dtype: Literal["float16", "float32"] = "float16"
     write_features: bool = False
     write_latent_outputs: bool = False
     write_full_confidence_scores: bool = True
+
+    @model_validator(mode="after")
+    def resolve_confidence_format(self):
+        selected = "npz" if self.compress_full_confidence else "json"
+        if self.compress_full_confidence is not None and self.full_confidence_output_format is not None and self.full_confidence_output_format != selected:
+            raise ValueError("compress_full_confidence conflicts with full_confidence_output_format")
+        self.full_confidence_output_format = self.full_confidence_output_format or selected
+        self.compress_full_confidence = self.full_confidence_output_format == "npz"
+        return self
 
 
 class ExperimentSettings(BaseModel):
@@ -316,7 +326,7 @@ class InferenceExperimentSettings(ExperimentSettings):
     run_data_pipeline: bool = True
     run_inference: bool = True
     write_input_json: bool = True
-    compress_fold_input: bool = True
+    compress_fold_input: bool = False
 
     @model_validator(mode="after")
     def validate_stages(self):

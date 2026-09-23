@@ -134,16 +134,30 @@ bash run_openfold.sh -i results/example/example_data.json -o results -D false -P
 
 `-D` controls native preparation/search. `-P` controls prediction. `-w` in the
 shell wrapper (`-J` / `--write-input-json` in Python CLI) controls publication.
-When omitted, publication follows D.
+When omitted, publication defaults to true, including inference-only and fully skipped runs.
 
 With writing enabled, even an existing snapshot is updated:
 
 ```text
 results/example/example_data.json
-results/example/msas/example__A_unpairedmsa.a3m.zst
-results/example/msas/example__A_pairedmsa.a3m.zst
-results/example/msas/example__A_template_0.cif.zst
+results/example/msas/example__A_unpairedmsa.a3m
+results/example/msas/example__A_pairedmsa.a3m
+results/example/msas/example__A_template_0.cif
 ```
+
+`--compress_fold_input` / `--compress-fold-input` (shell `-z`) defaults to false;
+true writes the external A3M/mmCIF resources as zstd. Reading either format is
+independent of this write option.
+
+`--compress_full_confidence` / `--compress-full-confidence` (shell `-f`) selects
+compressed NPZ when true and JSON when false. Omitting both it and the legacy
+`output_writer_settings.full_confidence_output_format` resolves to false/JSON.
+An explicitly configured legacy npz format remains effective if the new bool is
+omitted; explicitly conflicting choices fail. Existing dtype conversion and JSON
+rounding rules are retained, so the two encodings need not be bitwise equal.
+Keys, grouping and dimensions are preserved; features, latents, CIF and summaries
+are unaffected. Switching formats removes the matching old confidence file after
+successful publication. Skip checks require the effective selected format.
 
 Only supplied/generated resources are written; an empty paired channel has no
 paired file. JSON paths use `msas/...`. With D=false/J=true existing conditions

@@ -91,7 +91,7 @@ def test_af3_polymer_modifications_and_ligands_round_trip(tmp_path):
     }
     queries = load(tmp_path, payload)
     assert queries.queries["chemistry"].chains[0].non_canonical_residues == {2: "SEP"}
-    paths = bundle.write_af3_query_sets(queries, tmp_path / "out")
+    paths = bundle.write_af3_query_sets(queries, tmp_path / "out", compress=True)
     result = json.loads(paths["chemistry"].read_text())
     actual = result["sequences"]
     rna = actual[1]["rna"]
@@ -133,7 +133,7 @@ A 3
     template = queries.queries["target"].chains[0].templates[0]
     assert template.query_indices == [1, 3]
     assert template.template_indices == [2, 4]
-    paths = bundle.write_af3_query_sets(queries, tmp_path / "out")
+    paths = bundle.write_af3_query_sets(queries, tmp_path / "out", compress=True)
     payload = json.loads(paths["target"].read_text())
     public = payload["sequences"][0]["protein"]["templates"][0]
     assert public["queryIndices"] == [0, 2]
@@ -225,9 +225,9 @@ def test_data_prepared_rna_can_be_read_again(tmp_path):
             ],
         },
     )
-    bundle.materialise_msas(queries, tmp_path / "prepared", MSASettings())
-    bundle.materialise_templates(queries, tmp_path / "prepared", SimpleNamespace())
-    path = bundle.write_af3_query_sets(queries, tmp_path / "out")["rna"]
+    bundle.materialise_msas(queries, tmp_path / "prepared", MSASettings(), compress=True)
+    bundle.materialise_templates(queries, tmp_path / "prepared", SimpleNamespace(), compress=True)
+    path = bundle.write_af3_query_sets(queries, tmp_path / "out", compress=True)["rna"]
     reread = bundle.load_af3_query_set(path, tmp_path / "reload")
     assert "AC-U" in read_text_auto(
         reread.queries["rna"].chains[0].main_msa_file_paths[0]
@@ -250,8 +250,8 @@ def test_materialisation_preserves_declared_msa_when_use_disabled(tmp_path, flag
             "openfold3": {flag: False},
         },
     )
-    bundle.materialise_msas(queries, tmp_path / "prepared", MSASettings())
-    path = bundle.write_af3_query_sets(queries, tmp_path / "out")["target"]
+    bundle.materialise_msas(queries, tmp_path / "prepared", MSASettings(), compress=True)
+    path = bundle.write_af3_query_sets(queries, tmp_path / "out", compress=True)["target"]
     payload = json.loads(path.read_text())
     assert payload["openfold3"][flag] is False
     saved = payload["sequences"][0]["protein"]
@@ -263,7 +263,7 @@ def test_failed_snapshot_publication_restores_previous_files(tmp_path, monkeypat
     from openfold3.core.data import af3_input
 
     queries = load(tmp_path, protein(unpairedMsa=">q\nACDE\n"))
-    path = bundle.write_af3_query_sets(queries, tmp_path / "out")["target"]
+    path = bundle.write_af3_query_sets(queries, tmp_path / "out", compress=True)["target"]
     before = {p: p.read_bytes() for p in path.parent.rglob("*") if p.is_file()}
     queries.queries["target"].chains[0].main_msa_file_paths[0].write_text(
         ">q\nACDE\n>new\nAC-E\n"
@@ -280,7 +280,7 @@ def test_failed_snapshot_publication_restores_previous_files(tmp_path, monkeypat
 
     monkeypatch.setattr(af3_input.os, "replace", fail_json_once)
     with pytest.raises(OSError, match="injected"):
-        bundle.write_af3_query_sets(queries, tmp_path / "out")
+        bundle.write_af3_query_sets(queries, tmp_path / "out", compress=True)
     assert {p: p.read_bytes() for p in path.parent.rglob("*") if p.is_file()} == before
 
 
@@ -318,15 +318,15 @@ def test_af3_snapshot_overwrites_resources_and_preserves_omitted_vs_empty(tmp_pa
     queries = load(
         tmp_path, protein(unpairedMsa=">q\nACDE\n", pairedMsa="", templates=[])
     )
-    paths = bundle.write_af3_query_sets(queries, tmp_path / "out")
+    paths = bundle.write_af3_query_sets(queries, tmp_path / "out", compress=True)
     saved = json.loads(paths["target"].read_text())["sequences"][0]["protein"]
     assert saved["pairedMsa"] == ""
     assert saved["templates"] == []
     source = queries.queries["target"].chains[0].main_msa_file_paths[0]
     source.write_text(">q\nACDE\n>new\nAC-E\n")
-    bundle.write_af3_query_sets(queries, tmp_path / "out")
+    bundle.write_af3_query_sets(queries, tmp_path / "out", compress=True)
     assert "new" in read_text_auto(paths["target"].parent / saved["unpairedMsaPath"])
-    paths = bundle.write_af3_query_sets(load(tmp_path, protein()), tmp_path / "omitted")
+    paths = bundle.write_af3_query_sets(load(tmp_path, protein()), tmp_path / "omitted", compress=True)
     saved = json.loads(paths["target"].read_text())["sequences"][0]["protein"]
     assert "unpairedMsa" not in saved and "unpairedMsaPath" not in saved
     assert "templates" not in saved
@@ -463,8 +463,8 @@ def test_predict_stage_write_contract_and_private_resource_lifetime(
     result = CliRunner().invoke(run_openfold.cli, args)
     assert result.exit_code == 0, (result.output, repr(result.exception))
     job = tmp_path / "out/target"
-    assert (job / "target_data.json").exists() == (write is True)
-    assert (job / "msas").exists() == (write is True)
+    assert (job / "target_data.json").exists() == (write is not False)
+    assert (job / "msas").exists() == (write is not False)
     assert not list(scratch.iterdir())
     if inference:
         assert consumed and all(not p.exists() for p in consumed)

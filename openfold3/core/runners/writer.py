@@ -113,17 +113,21 @@ class OF3OutputWriter(BasePredictionWriter):
         self,
         output_dir: Path,
         structure_format: str = "pdb",
-        full_confidence_output_format: str = "npz",
+        full_confidence_output_format: str | None = None,
         full_confidence_output_dtype: Literal["float32", "float16"] = "float16",
         write_features: bool = False,
         write_latent_outputs: bool = False,
         write_full_confidence_scores: bool = True,
         summary_dir: Path | None = None,
+        compress_full_confidence: bool | None = None,
     ):
         super().__init__(write_interval="batch")
         self.output_dir = Path(output_dir)
         self.structure_format = structure_format
-        self.full_confidence_format = full_confidence_output_format
+        selected = "npz" if compress_full_confidence else "json"
+        if compress_full_confidence is not None and full_confidence_output_format is not None and full_confidence_output_format != selected:
+            raise ValueError("compress_full_confidence conflicts with full_confidence_output_format")
+        self.full_confidence_format = full_confidence_output_format or selected
         self.full_confidence_dtype = np.dtype(full_confidence_output_dtype)
         self.write_features = write_features
         self.write_latent_outputs = write_latent_outputs
@@ -271,6 +275,7 @@ class OF3OutputWriter(BasePredictionWriter):
                         temporary_path,
                         **full_confidence_scores,
                     )
+            out_file_full.with_suffix(".json" if out_fmt == "npz" else ".npz").unlink(missing_ok=True)
 
     def write_all_outputs(self, batch: dict, outputs: dict, confidence_scores: dict):
         """Writes all outputs for a given batch."""

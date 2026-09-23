@@ -130,7 +130,7 @@ def test_prepared_unpaired_replacement_preserves_native_template_and_pairing(
         assert {path.relative_to(job) for path in job.rglob("*")} == before_paths
     else:
         current = json.loads(prepared.read_text())["sequences"][0]["protein"]
-        assert current["unpairedMsaPath"] == "msas/job__A_unpairedmsa.a3m.zst"
+        assert current["unpairedMsaPath"] == "msas/job__A_unpairedmsa.a3m"
         # Data serialization may normalize A3M headers, not residues/insertions.
         assert "AxxCD-" in read_text_auto(job / current["unpairedMsaPath"])
         assert current["templates"] == mapping

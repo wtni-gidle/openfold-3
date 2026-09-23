@@ -90,7 +90,7 @@ class TestPredictionWriter:
             "chain_pair_iptm": {"(1, 2)": ones((1, 2))},
             "bespoke_iptm": {"(1, 2)": ones((1, 2))},
         }
-        writer = OF3OutputWriter(tmp_path, structure_format="pdb")
+        writer = OF3OutputWriter(tmp_path, structure_format="pdb", full_confidence_output_format="npz")
 
         writer.write_all_outputs(
             batch,
@@ -256,14 +256,14 @@ class TestPredictionWriter:
                     f"Expected dtype {output_dtype} for {k}, but got {actual_full_scores[k].dtype}"
                 )
 
-    def test_default_full_confidence_output_is_compressed_float16_npz(
+    def test_explicit_full_confidence_output_is_compressed_float16_npz(
         self, tmp_path, dummy_confidence_scores
     ):
         atom_array = structure.AtomArray(5)
         atom_array.coord = np.zeros((5, 3))
         atom_array.chain_id = np.array(["A", "A", "B", "B", "B"])
         output_prefix = tmp_path / "test"
-        output_writer = OF3OutputWriter(tmp_path)
+        output_writer = OF3OutputWriter(tmp_path, compress_full_confidence=True)
 
         output_writer.write_confidence_scores(
             dummy_confidence_scores,
