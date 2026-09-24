@@ -422,15 +422,19 @@ class OF3OutputWriter(BasePredictionWriter):
                 gathered_data = [None] * trainer.world_size
                 dist.all_gather_object(gathered_data, final_summary_data)
 
-            if trainer.is_global_zero:
-                # Aggregate the results from all processes on Rank 0
-                total_queries = sum(data["total"] for data in gathered_data)
-                success_count = sum(data["success"] for data in gathered_data)
-                failed_count = sum(data["failed"] for data in gathered_data)
-                final_failed_list = [
-                    item for data in gathered_data for item in data["failed_queries"]
-                ]
+            # Every rank must report failure, including ranks whose own queries
+            # all succeeded. all_gather_object provides the same totals to each.
+            total_queries = sum(data["total"] for data in gathered_data)
+            success_count = sum(data["success"] for data in gathered_data)
+            failed_count = sum(data["failed"] for data in gathered_data)
+            final_failed_list = [
+                item for data in gathered_data for item in data["failed_queries"]
+            ]
 
+            if trainer.is_global_zero:
+                # Best effort under distributed process teardown: another rank
+                # may raise first. Avoid a barrier that could hang if writing
+                # this summary fails; each rank's exception carries the totals.
                 self._write_summary(
                     total_queries=total_queries,
                     success_count=success_count,
@@ -439,11 +443,6 @@ class OF3OutputWriter(BasePredictionWriter):
                     global_rank=trainer.global_rank,
                     is_complete=True,
                 )
-                if total_queries > 0 and success_count == 0:
-                    raise RuntimeError(
-                        "OpenFold3 produced no successful prediction outputs"
-                    )
-
         except RuntimeError as e:
             # TODO: Due to additional sync PL does outside of this callback,
             #  this won't be reached before the timeout error occurs.
@@ -465,9 +464,20 @@ class OF3OutputWriter(BasePredictionWriter):
                     is_complete=False,
                 )
 
-            else:
-                # Re-raise unexpected runtime errors
-                raise e
+            # A fallback summary is diagnostic, not a successful prediction run.
+            # Preserve the original collective failure and traceback as well as
+            # unexpected runtime errors.
+            raise
+
+        if failed_count > 0:
+            failed_queries = ", ".join(sorted(set(final_failed_list)))
+            raise RuntimeError(
+                f"OpenFold3 prediction failed: {failed_count} of "
+                f"{total_queries} queries failed; {success_count} successful. "
+                f"Failed queries: {failed_queries}"
+            )
+        if total_queries > 0 and success_count == 0:
+            raise RuntimeError("OpenFold3 produced no successful prediction outputs")
 
     def _write_summary(
         self,

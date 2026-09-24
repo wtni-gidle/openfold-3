@@ -26,6 +26,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import click
+from pydantic import TypeAdapter
 
 from openfold3.core.config import config_utils
 from openfold3.entry_points.import_utils import (
@@ -152,7 +153,7 @@ def train(
     "--runner_yaml",
     type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
     required=False,
-    help="Yaml that specifies model and dataset parameters, see examples/runner.yml",
+    help="Runner YAML; explicitly configured values override CLI values and defaults.",
 )
 @click.option(
     "--use-msa-server",
@@ -160,8 +161,7 @@ def train(
     type=bool,
     default=None,
     help=(
-        "Use ColabFold MSA server to perform alignments. If unset, the value from"
-        " the runner yaml (or config default) is used."
+        "Use ColabFold MSA server. An explicit runner YAML value takes precedence."
     ),
 )
 @click.option(
@@ -170,8 +170,7 @@ def train(
     type=bool,
     default=None,
     help=(
-        "Whether to use templates for prediction. If unset, the value from the"
-        " runner yaml (or config default) is used."
+        "Use templates for prediction. An explicit runner YAML value takes precedence."
     ),
 )
 @click.option(
@@ -261,6 +260,76 @@ def predict(
     use_tf32: bool = True,
 ):
     """Perform inference on a set of queries defined in the query_json."""
+    # Resolve explicit YAML values before validating or acting on CLI defaults.
+    # The explicit runner file overrides the cached runner file; both have
+    # precedence over the CLI, matching the EnsembleFold AF3 reference.
+    default_yml = (
+        Path(os.environ.get("OPENFOLD_CACHE") or DEFAULT_CACHE_PATH) / "runner.yml"
+    )
+    user_default_runner_path = None
+    runner_args = {}
+    if default_yml.exists():
+        runner_args = config_utils.load_yaml(default_yml)
+        user_default_runner_path = default_yml.resolve()
+    if runner_yaml:
+        explicit_args = config_utils.load_yaml(runner_yaml)
+        # Alternative names for one logical setting must replace the lower
+        # priority choice as a group, not leave a conflicting cached alias.
+        # Conflicts within the explicit file are still validated normally.
+        for section, keys in (
+            (None, ("inference_ckpt_path", "inference_ckpt_name")),
+            ("output_writer_settings", (
+                "compress_full_confidence", "full_confidence_output_format"
+            )),
+        ):
+            incoming = explicit_args if section is None else explicit_args.get(section, {})
+            existing = runner_args if section is None else runner_args.get(section, {})
+            if any(key in incoming for key in keys):
+                for key in keys:
+                    existing.pop(key, None)
+        config_utils.deep_update(runner_args, explicit_args)
+
+    experiment_settings = runner_args.setdefault("experiment_settings", {})
+    # Use the same boolean coercion as the configuration schema before any
+    # control flow (quoted "false" must not enable backend setup or writing).
+    boolean = TypeAdapter(bool)
+    for key in ("run_data_pipeline", "run_inference", "write_input_json", "compress_fold_input"):
+        if key in experiment_settings:
+            experiment_settings[key] = boolean.validate_python(experiment_settings[key])
+    run_data_pipeline = experiment_settings.get("run_data_pipeline", run_data_pipeline)
+    run_inference = experiment_settings.get("run_inference", run_inference)
+    write_input_json = experiment_settings.get("write_input_json", write_input_json)
+    compress_fold_input = experiment_settings.get("compress_fold_input", compress_fold_input)
+    # The runner already consumes configured values when a CLI override is None.
+    if "use_msa_server" in experiment_settings:
+        use_msa_server = None
+    if "use_templates" in experiment_settings:
+        use_templates = None
+    if "output_dir" in experiment_settings:
+        output_dir = None
+    runner_configures_seeds = any(
+        key in experiment_settings for key in ("seeds", "num_seeds")
+    )
+    if runner_configures_seeds:
+        seeds = num_model_seeds = None
+    custom_diffusion = (
+        runner_args.get("model_update", {}).get("custom", {})
+        .get("architecture", {}).get("shared", {}).get("diffusion", {})
+    )
+    if "no_full_rollout_samples" in custom_diffusion:
+        num_diffusion_samples = None
+    template_settings = runner_args.get("template_preprocessor_settings", {})
+    if "max_release_date" in template_settings:
+        max_template_date = None
+    output_settings = runner_args.setdefault("output_writer_settings", {})
+    if not any(key in output_settings for key in (
+        "compress_full_confidence", "full_confidence_output_format"
+    )) and compress_full_confidence is not None:
+        output_settings["compress_full_confidence"] = compress_full_confidence
+    if not any(key in runner_args for key in ("inference_ckpt_path", "inference_ckpt_name")):
+        runner_args["inference_ckpt_path"] = inference_ckpt_path
+        runner_args["inference_ckpt_name"] = inference_ckpt_name
+
     if not run_data_pipeline and not run_inference:
         raise click.UsageError(
             "At least one of --run-data-pipeline and --run-inference must be true"
@@ -337,32 +406,12 @@ def predict(
 
     logging.basicConfig(level=logging.INFO)
 
-    default_yml = (
-        Path(os.environ.get("OPENFOLD_CACHE") or DEFAULT_CACHE_PATH) / "runner.yml"
-    )
-    user_default_runner_path = None
-
-    if default_yml.exists():
-        runner_args = config_utils.load_yaml(default_yml)
-        user_default_runner_path = default_yml.resolve()
-    else:
-        runner_args = dict()
-
-    if runner_yaml:
-        config_utils.deep_update(runner_args, config_utils.load_yaml(runner_yaml))
-
-    if compress_full_confidence is not None:
-        runner_args.setdefault("output_writer_settings", {})["compress_full_confidence"] = compress_full_confidence
-    experiment_settings = runner_args.setdefault("experiment_settings", {})
-    runner_configures_seeds = any(
-        key in experiment_settings for key in ("seeds", "num_seeds")
-    )
     experiment_settings["run_data_pipeline"] = run_data_pipeline
     experiment_settings["run_inference"] = run_inference
     experiment_settings["write_input_json"] = write_input_json
     experiment_settings["compress_fold_input"] = compress_fold_input
     if skip is not None:
-        experiment_settings["skip_existing"] = skip
+        experiment_settings.setdefault("skip_existing", skip)
 
     # Inject owned defaults BEFORE validation derives download/cache directories.
     # Explicit structure/precache stores are user inputs and remain untouched;
@@ -389,8 +438,6 @@ def predict(
             template_args[key] = template_root / child
 
     expt_config = InferenceExperimentConfig(
-        inference_ckpt_path=inference_ckpt_path,
-        inference_ckpt_name=inference_ckpt_name,
         user_default_runner_yaml_path=user_default_runner_path,
         **runner_args,
     )

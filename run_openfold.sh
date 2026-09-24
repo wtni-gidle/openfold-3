@@ -15,6 +15,7 @@ usage() {
     echo "  -r  One seed or comma-separated seeds."
     echo "  -s  Diffusion samples per seed."
     echo "  -y  Runner YAML."
+    echo "      Explicit YAML settings take precedence over CLI options and defaults."
     echo "  -k  Inference checkpoint path."
     echo "  -M  Use ColabFold MSA server. (default: true)"
     echo "  -T  Use templates. (default: true)"
@@ -72,10 +73,7 @@ if [[ "$compress_fold_input" == "" ]]; then compress_fold_input="false"; fi
 if [[ "$skip" == "" ]]; then skip="false"; fi
 if [[ "$use_tf32" == "" ]]; then use_tf32="true"; fi
 
-if [[ "$run_data_pipeline" == "false" && "$run_inference" == "false" ]]; then
-    echo "Error: run_data_pipeline and run_inference cannot both be false."
-    exit 1
-fi
+# Python validates the effective stages after applying runner YAML precedence.
 
 openfold_bin="${OPENFOLD_BIN:-run_openfold}"
 if ! command -v "$openfold_bin" >/dev/null 2>&1; then
@@ -93,9 +91,9 @@ if [[ -x "$openfold_bin_directory/ptxas" ]]; then
     export TRITON_PTXAS_BLACKWELL_PATH="${TRITON_PTXAS_BLACKWELL_PATH:-$openfold_bin_directory/ptxas}"
 fi
 
-if [[ "$run_inference" == "true" ]]; then
-    export CUDA_VISIBLE_DEVICES="$gpu_device"
-fi
+# YAML may enable inference even when -P was false. Set device visibility here;
+# the Python entry point alone decides whether inference actually runs.
+export CUDA_VISIBLE_DEVICES="$gpu_device"
 
 command_args=(
     predict

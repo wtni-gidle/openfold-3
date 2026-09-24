@@ -33,8 +33,9 @@ Unknown fields are errors, not ignored. In particular AF3 `bondedAtomPairs` and
 `userCCD` are not automatically translated into OpenFold3 atom/CCD definitions.
 
 For batch execution use a list of these job objects with the same `modelSeeds`.
-Use separate invocations for differing seed lists. Existing CLI seed overrides
-still apply. Output-name collisions are rejected before runtime setup.
+Use separate invocations for differing seed lists. CLI seed overrides apply
+unless runner YAML configures seeds. Output-name collisions are rejected before
+runtime setup.
 
 ## MSA and templates
 
@@ -135,6 +136,24 @@ bash run_openfold.sh -i results/example/example_data.json -o results -D false -P
 `-D` controls native preparation/search. `-P` controls prediction. `-w` in the
 shell wrapper (`-J` / `--write-input-json` in Python CLI) controls publication.
 When omitted, publication defaults to true, including inference-only and fully skipped runs.
+
+For settings supported by both CLI and runner YAML, the priority is **explicit
+runner YAML > cached `$OPENFOLD_CACHE/runner.yml` > CLI > defaults**. Only keys
+explicitly present in YAML override the CLI; `false` remains a real override.
+This applies to stages, publication/compression, MSA server, templates, skip,
+seeds, output directory, checkpoint choice, the configured diffusion sample
+count, and the template cutoff. For example, YAML `use_templates: false` wins
+even over shell `-T true`. Omit the YAML key to control it from the command line.
+YAML `template_preprocessor_settings.max_release_date` retains its native
+exclusive-cutoff meaning; only CLI `--max_template_date` is converted from an
+inclusive cutoff. Runtime scratch directories and public CIF/AF3 input
+constraints remain wrapper safety rules, not user-overridable defaults.
+
+Partial prediction or writing failure now causes nonzero command exit after
+reporting the failed queries; already successful files remain. All-skipped runs
+still succeed. Distributed synchronization failure also propagates after local
+fallback diagnostics; the rank-zero summary is best effort during process
+teardown. This does not add rollback for partially overwritten sample files.
 
 With writing enabled, even an existing snapshot is updated:
 
